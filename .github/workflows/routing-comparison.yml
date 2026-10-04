@@ -15,7 +15,7 @@ jobs:
           - label: base
             revision: d0d1e51eaed715dce78e332f84010784aead84a0
           - label: candidate
-            revision: e4b823d394637d41018af4422766a1abe21b30f2
+            revision: 964e79ab91a01e4684046e064b4a7122422ec637
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     container:
@@ -24,9 +24,10 @@ jobs:
       run:
         shell: bash
     env:
-      CARGO_BUILD_JOBS: '2'
+      CARGO_BUILD_JOBS: '1'
       CARGO_INCREMENTAL: '0'
-      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      RUST_MIN_STACK: '67108864'
       OH_COV_DOCTESTS: '0'
       OH_COV_TUI: '0'
       OUT: ci-out/lcov/lcov-core.info
