@@ -40,7 +40,9 @@ jobs:
           submodules: false
           persist-credentials: false
       - name: Initialize canonical submodules
-        run: bash scripts/ci/checkout-submodules.sh
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          bash scripts/ci/checkout-submodules.sh
       - name: Record exact inputs
         run: |
           mkdir -p ci-out/lcov
