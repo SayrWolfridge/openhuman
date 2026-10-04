@@ -1,0 +1,78 @@
+name: Routing baseline comparison
+on:
+  push:
+    branches: [codex/routing-ci-comparison]
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  compare:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: base
+            revision: d0d1e51eaed715dce78e332f84010784aead84a0
+          - label: candidate
+            revision: e4b823d394637d41018af4422766a1abe21b30f2
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    container:
+      image: ghcr.io/tinyhumansai/openhuman_ci@sha256:c3c20d625bcc9f75e50c3c2c2b75c88d3e60a3f4352b0f19f5327b490438722d
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      OH_COV_DOCTESTS: '0'
+      OH_COV_TUI: '0'
+      OUT: ci-out/lcov/lcov-core.info
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          repository: SayrWolfridge/openhuman
+          ref: ${{ matrix.revision }}
+          fetch-depth: 0
+          submodules: false
+          persist-credentials: false
+      - name: Initialize canonical submodules
+        run: bash scripts/ci/checkout-submodules.sh
+      - name: Record exact inputs
+        run: |
+          mkdir -p ci-out/lcov
+          { git rev-parse HEAD; rustc -V; cargo -V; git submodule status --recursive; } > ci-out/inputs.txt
+      - name: Linux TLS lockfile policy
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          bash scripts/check-linux-tls-dependencies.sh 2>&1 | tee ci-out/tls.log
+      - name: Module pins
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          bash scripts/ci/fetch-submodule-tags.sh
+          node scripts/ci/check-module-pins.mjs 2>&1 | tee ci-out/pins.log
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Install canonical test modules
+        run: |
+          bash scripts/ci/self-hosted/install-test-modules.sh "/opt/openhuman-test-modules/${GITHUB_RUN_ID}-${{ matrix.label }}" ci-out/test-modules.env
+          find "/opt/openhuman-test-modules/${GITHUB_RUN_ID}-${{ matrix.label }}" -name '*.so' -exec sha256sum {} + > ci-out/module-hashes.txt
+      - name: Canonical Rust coverage suite
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          set -a
+          source ci-out/test-modules.env
+          set +a
+          bash scripts/ci/rust-coverage.sh 2>&1 | tee ci-out/rust.log
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: comparison-${{ matrix.label }}
+          path: ci-out/
+          retention-days: 14
+          if-no-files-found: warn
