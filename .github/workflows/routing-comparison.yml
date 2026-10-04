@@ -8,6 +8,7 @@ permissions:
   actions: read
 jobs:
   compare:
+    if: ${{ !contains(github.event.head_commit.message, 'coverage reports only') }}
     strategy:
       fail-fast: false
       matrix:
@@ -79,3 +80,41 @@ jobs:
           path: ci-out/
           retention-days: 14
           if-no-files-found: warn
+
+  coverage-report:
+    if: contains(github.event.head_commit.message, 'coverage reports only')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 964e79ab91a01e4684046e064b4a7122422ec637
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: comparison-candidate
+          run-id: 37211888605
+          github-token: ${{ github.token }}
+          path: coverage-inputs/rust
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: ci-out-checks
+          run-id: 37156066640
+          repository: tinyhumansai/openhuman
+          github-token: ${{ github.token }}
+          path: coverage-inputs/frontend
+      - name: Verify unchanged frontend sources since coverage run
+        run: git diff --exit-code e4b823d394637d41018af4422766a1abe21b30f2 HEAD -- app/
+      - name: Install canonical coverage tool
+        run: python -m pip install 'diff-cover>=9.2.0'
+      - name: Measure changed-line coverage
+        run: |
+          find coverage-inputs -type f -name '*.info' -exec sed -i 's|/__w/openhuman/openhuman/||g' {} +
+          bash scripts/ci/self-hosted/diff-cover.sh coverage-inputs d0d1e51eaed715dce78e332f84010784aead84a0 diff-cover
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: routing-diff-coverage
+          path: diff-cover/
+          retention-days: 14
