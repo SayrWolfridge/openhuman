@@ -1,4 +1,4 @@
-name: Routing review diagnostics
+name: Routing review verification
 on:
   push:
     branches: [codex/routing-ci-comparison]
@@ -7,49 +7,125 @@ permissions:
   contents: read
   actions: read
 jobs:
-  environment:
+  rust-review:
     runs-on: ubuntu-22.04
-    timeout-minutes: 8
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - label: base
-            revision: 6c8c7ad93f1a66067c22bff382b9ddcf306294cd
-          - label: candidate
-            revision: aed298d08c844e4c48fb5f4451012d8029fe18d8
-          - label: merge
-            revision: e787118f51cf87cef1d007bde36f3f8735d96bb1
+    timeout-minutes: 90
     container:
       image: ghcr.io/tinyhumansai/openhuman_ci@sha256:c3c20d625bcc9f75e50c3c2c2b75c88d3e60a3f4352b0f19f5327b490438722d
     defaults:
       run:
         shell: bash
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      RUST_MIN_STACK: '67108864'
+      LLVM_PROFILE_FILE_NAME: openhuman-%8m.profraw
+      GH_TOKEN: ${{ github.token }}
     steps:
+      - name: Canonical hosted disk preparation
+        run: |
+          rm -rf /__t/* || true
+          df -h /__w
       - uses: actions/checkout@v7
         with:
-          ref: ${{ matrix.revision }}
+          ref: aed298d08c844e4c48fb5f4451012d8029fe18d8
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
           path: diagnostic-inputs
           persist-credentials: false
-      - name: Capture startup with no frontend dependencies
+      - name: Prepare canonical source dependencies
         run: |
-          mkdir -p ci-out
-          python3 diagnostic-inputs/.github/diagnostics/mock-startup.py | tee ci-out/before-cleanup.json
-          sha256sum scripts/mock-api-server.mjs scripts/mock-api-core.mjs > ci-out/mock-hashes.txt
-          { command -v node; command -v cargo; readlink -f "$(command -v cargo)"; rustup show active-toolchain; } > ci-out/toolchain.txt 2>&1
-      - name: Apply canonical hosted disk cleanup
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          bash scripts/ci/checkout-submodules.sh
+          pnpm install --frozen-lockfile
+          mkdir -p ci-out/lcov
+          python3 diagnostic-inputs/.github/diagnostics/mock-startup.py > ci-out/mock-after-dependencies.json
+          python3 -c 'import json; assert json.load(open("ci-out/mock-after-dependencies.json"))["healthy"]'
+          { git rev-parse HEAD; rustc -V; cargo -V; git submodule status --recursive; } > ci-out/inputs.txt
+          sha256sum diagnostic-inputs/.github/diagnostics/review-candidate.patch diagnostic-inputs/.github/diagnostics/review-regressions-only.patch > ci-out/patch-hashes.txt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+          shared-key: ci-fast-rust-cov
+          cache-on-failure: false
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Install canonical test modules
+        run: bash scripts/ci/self-hosted/install-test-modules.sh "/opt/openhuman-test-modules/${GITHUB_RUN_ID}-review" ci-out/test-modules.env
+      - name: Demonstrate new regressions on pre-fix production
         run: |
-          rm -rf /__t/* || true
-          df -h /__w || true
-      - name: Capture startup after canonical hosted cleanup
-        run: python3 diagnostic-inputs/.github/diagnostics/mock-startup.py | tee ci-out/after-cleanup.json
+          set -a
+          source ci-out/test-modules.env
+          set +a
+          unset RUSTFLAGS
+          FEATURES="$(bash scripts/ci/product-features.sh)"
+          git apply diagnostic-inputs/.github/diagnostics/review-regressions-only.patch
+          for TEST in persisted_managed_model_changes_invalidate_the_session_fingerprint enforce_local_only_inference_errors_on_external_when_local_only; do
+            set +e
+            cargo llvm-cov --features "$FEATURES" --no-report -p openhuman --lib "$TEST" -- --test-threads=1 > "ci-out/red-$TEST.log" 2>&1
+            RESULT=$?
+            set -e
+            cat "ci-out/red-$TEST.log"
+            test "$RESULT" = 101
+            grep -q 'test result: FAILED' "ci-out/red-$TEST.log"
+          done
+          git apply -R diagnostic-inputs/.github/diagnostics/review-regressions-only.patch
+      - name: Compare unchanged sandbox fixture on original PR head
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          unset RUSTFLAGS
+          FEATURES="$(bash scripts/ci/product-features.sh)"
+          cargo llvm-cov --features "$FEATURES" --no-report -p openhuman --lib landlock_jail_runs_cargo_and_mktemp_but_blocks_writes_outside -- --test-threads=1 2>&1 | tee ci-out/original-head-sandbox.log
+      - name: Apply exact reviewed candidate and check formatting
+        run: |
+          git apply --check diagnostic-inputs/.github/diagnostics/review-candidate.patch
+          git apply diagnostic-inputs/.github/diagnostics/review-candidate.patch
+          git diff --check
+          git diff --binary > ci-out/applied.patch
+          cmp ci-out/applied.patch diagnostic-inputs/.github/diagnostics/review-candidate.patch
+          git diff --name-only -- '*.rs' | xargs rustfmt --edition 2021 --check
+          cargo llvm-cov clean --workspace
+      - name: Run affected session and privacy unit tests
+        run: |
+          set -o pipefail
+          set -a
+          source ci-out/test-modules.env
+          set +a
+          unset RUSTFLAGS
+          FEATURES="$(bash scripts/ci/product-features.sh)"
+          for TEST in web_chat::session enforce_local_only_inference_errors_on_external_when_local_only; do
+            cargo llvm-cov --features "$FEATURES" --no-report -p openhuman --lib "$TEST" -- --test-threads=1 2>&1 | tee "ci-out/fixed-${TEST//:/_}.log"
+          done
+      - name: Verify actual outgoing RPC routing on a warm conversation
+        run: |
+          set -o pipefail
+          set -a
+          source ci-out/test-modules.env
+          set +a
+          unset RUSTFLAGS
+          FEATURES="$(bash scripts/ci/product-features.sh)"
+          cargo llvm-cov --features "$FEATURES" --no-report -p openhuman-cli --test json_rpc_e2e json_rpc_web_chat_custom_chat_provider_uses_stored_key_and_rebuilds_on_route_change -- --test-threads=1 2>&1 | tee ci-out/rpc-routing.log
+      - name: Verify a representative memory test with canonical dependencies
+        run: |
+          set -o pipefail
+          set -a
+          source ci-out/test-modules.env
+          set +a
+          unset RUSTFLAGS
+          FEATURES="$(bash scripts/ci/product-features.sh)"
+          cargo llvm-cov --features "$FEATURES" --no-report -p openhuman-cli --test memory_v2_e2e engines_list_get_and_set -- --test-threads=1 2>&1 | tee ci-out/memory-after-dependencies.log
+      - name: Collect measured Rust coverage
+        if: always()
+        run: |
+          unset RUSTFLAGS
+          cargo llvm-cov report --lcov --output-path ci-out/lcov/lcov-core.info
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
-          name: review-environment-${{ matrix.label }}
+          name: routing-review-rust
           path: ci-out/
           retention-days: 14

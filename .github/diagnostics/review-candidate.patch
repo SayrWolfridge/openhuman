@@ -1,0 +1,731 @@
+diff --git a/app/src/features/conversations/Conversations.processSourceCommand.test.tsx b/app/src/features/conversations/Conversations.processSourceCommand.test.tsx
+index d94c09aece..c23a837036 100644
+--- a/app/src/features/conversations/Conversations.processSourceCommand.test.tsx
++++ b/app/src/features/conversations/Conversations.processSourceCommand.test.tsx
+@@ -18,6 +18,7 @@ import { SidebarSlotOutlet, SidebarSlotProvider } from '../../components/layout/
+ import { registry } from '../../lib/commands/registry';
+ import { threadApi } from '../../services/api/threadApi';
+ import { chatSend } from '../../services/chatService';
++import { callCoreRpc } from '../../services/coreRpcClient';
+ import chatRuntimeReducer from '../../store/chatRuntimeSlice';
+ import layoutReducer from '../../store/layoutSlice';
+ import queueReducer from '../../store/queueSlice';
+@@ -51,6 +52,8 @@ const { mockGetThreads, mockGetThreadMessages, mockUseUsageState, mockChatSend }
+   })
+ );
+ 
++vi.mock('../../services/coreRpcClient', () => ({ callCoreRpc: vi.fn().mockResolvedValue({}) }));
++
+ vi.mock('../../services/chatService', () => ({
+   chatCancel: vi.fn().mockResolvedValue({ accepted: true, turnCancelled: true }),
+   chatClearQueue: vi.fn().mockResolvedValue(0),
+@@ -69,7 +72,7 @@ vi.mock('../../components/settings/panels/ai/ProviderModelPickerDialog', () => (
+     onSelect,
+   }: {
+     onSelect: (selection: {
+-      source: { kind: 'cloud'; providerSlug: string };
++      source: { kind: 'cloud'; providerSlug: string } | { kind: 'managed' };
+       model: string;
+     }) => void;
+   }) => (
+@@ -81,6 +84,9 @@ vi.mock('../../components/settings/panels/ai/ProviderModelPickerDialog', () => (
+         }>
+         Pick Hugging Face model
+       </button>
++      <button type="button" onClick={() => onSelect({ source: { kind: 'managed' }, model: '' })}>
++        Clear model
++      </button>
+     </div>
+   ),
+ }));
+@@ -226,11 +232,49 @@ async function submitComposerText(text: string) {
+   await waitFor(() => expect(mockChatSend).toHaveBeenCalledTimes(1));
+ }
+ 
++async function clickSendButtonWithDraft(text: string) {
++  const input = screen.getByRole('textbox');
++  await act(async () => {
++    input.textContent = text;
++    fireEvent.input(input, { data: text, inputType: 'insertText' });
++  });
++  const sendButton = screen.getByTestId('send-message-button');
++  await waitFor(() => expect(sendButton).not.toBeDisabled());
++  await act(async () => {
++    fireEvent.click(sendButton);
++  });
++}
++
+ async function selectPickerModel() {
+   fireEvent.click(screen.getByTestId('composer-chat-settings'));
+   fireEvent.click(await screen.findByRole('button', { name: 'Pick Hugging Face model' }));
+ }
+ 
++async function clearPickerModel() {
++  fireEvent.click(screen.getByTestId('composer-chat-settings'));
++  fireEvent.click(await screen.findByRole('button', { name: 'Clear model' }));
++}
++
++function deferred<T>() {
++  let resolve!: (value: T) => void;
++  let reject!: (reason?: unknown) => void;
++  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
++    resolve = resolvePromise;
++    reject = rejectPromise;
++  });
++  return { promise, resolve, reject };
++}
++
++function mockModelSettingsWrites(writes: Record<string, Promise<unknown>>) {
++  vi.mocked(callCoreRpc).mockImplementation(({ method, params }) => {
++    if (method === 'openhuman.inference_update_model_settings') {
++      const defaultModel = (params as { default_model: string }).default_model;
++      return (writes[defaultModel] ?? Promise.resolve({})) as ReturnType<typeof callCoreRpc>;
++    }
++    return Promise.resolve({}) as ReturnType<typeof callCoreRpc>;
++  });
++}
++
+ // The predicate's other half (`selectedThreadId !== null`) is deliberately not
+ // asserted here: on `/chat` it is unreachable as a steady state. The boot effect
+ // reuses an empty thread or calls `handleCreateNewThread`, so the page always
+@@ -332,6 +376,148 @@ describe('composer model routing', () => {
+     registry.reset();
+   });
+ 
++  it('waits for a successful model clear before sending a normal default turn', async () => {
++    const clear = deferred<unknown>();
++    mockModelSettingsWrites({ 'huggingface:org/model': Promise.resolve({}), '': clear.promise });
++    await renderChat('text');
++    await selectPickerModel();
++    await clearPickerModel();
++
++    await clickSendButtonWithDraft('wait for clear');
++    expect(mockChatSend).not.toHaveBeenCalled();
++    expect(threadApi.appendMessage).not.toHaveBeenCalled();
++
++    await act(async () => clear.resolve({}));
++    await waitFor(() => expect(mockChatSend).toHaveBeenCalledTimes(1));
++    expect(mockChatSend.mock.calls[0][0]).not.toHaveProperty('model');
++  });
++
++  it('waits for a successful model clear before sending a follow-up', async () => {
++    const clear = deferred<unknown>();
++    mockModelSettingsWrites({ 'huggingface:org/model': Promise.resolve({}), '': clear.promise });
++    await renderChat('text', false, true);
++    await selectPickerModel();
++    await clearPickerModel();
++
++    await clickSendButtonWithDraft('wait for follow-up clear');
++    expect(mockChatSend).not.toHaveBeenCalled();
++
++    await act(async () => clear.resolve({}));
++    await waitFor(() => expect(mockChatSend).toHaveBeenCalledTimes(1));
++    expect(mockChatSend.mock.calls[0][0]).toMatchObject({ queueMode: 'followup' });
++    expect(mockChatSend.mock.calls[0][0]).not.toHaveProperty('model');
++  });
++
++  it('blocks a normal send after a rejected clear and keeps the draft', async () => {
++    const clear = deferred<unknown>();
++    mockModelSettingsWrites({ 'huggingface:org/model': Promise.resolve({}), '': clear.promise });
++    await renderChat('text');
++    await selectPickerModel();
++    await clearPickerModel();
++
++    await clickSendButtonWithDraft('retry this draft');
++    await act(async () => clear.reject(new Error('clear failed')));
++
++    expect(mockChatSend).not.toHaveBeenCalled();
++    expect(threadApi.appendMessage).not.toHaveBeenCalled();
++    expect(screen.getByRole('textbox')).toHaveTextContent('retry this draft');
++    await waitFor(() =>
++      expect(screen.getByTestId('chat-send-error')).toHaveAttribute(
++        'data-chat-send-error-code',
++        'cloud_send_failed'
++      )
++    );
++
++    const input = screen.getByRole('textbox');
++    await act(async () => {
++      input.textContent = 'retry this draft edited';
++      fireEvent.input(input, {
++        data: 'retry this draft edited',
++        inputType: 'insertText',
++      });
++    });
++    await waitFor(() => expect(screen.queryByTestId('chat-send-error')).not.toBeInTheDocument());
++    expect(mockChatSend).not.toHaveBeenCalled();
++  });
++
++  it('blocks a follow-up after a rejected clear and keeps the draft', async () => {
++    const clear = deferred<unknown>();
++    mockModelSettingsWrites({ 'huggingface:org/model': Promise.resolve({}), '': clear.promise });
++    await renderChat('text', false, true);
++    await selectPickerModel();
++    await clearPickerModel();
++
++    await clickSendButtonWithDraft('retry this follow-up');
++    await act(async () => clear.reject(new Error('clear failed')));
++
++    expect(mockChatSend).not.toHaveBeenCalled();
++    expect(screen.getByRole('textbox')).toHaveTextContent('retry this follow-up');
++    await waitFor(() =>
++      expect(screen.getByTestId('chat-send-error')).toHaveAttribute(
++        'data-chat-send-error-code',
++        'cloud_send_failed'
++      )
++    );
++
++    const input = screen.getByRole('textbox');
++    await act(async () => {
++      input.textContent = 'retry this follow-up edited';
++      fireEvent.input(input, {
++        data: 'retry this follow-up edited',
++        inputType: 'insertText',
++      });
++    });
++    await waitFor(() => expect(screen.queryByTestId('chat-send-error')).not.toBeInTheDocument());
++    expect(mockChatSend).not.toHaveBeenCalled();
++  });
++
++  it('does not wait for selected-model persistence before an explicit-model send', async () => {
++    const persist = deferred<unknown>();
++    mockModelSettingsWrites({ 'huggingface:org/model': persist.promise });
++    await renderChat('text');
++
++    await selectPickerModel();
++    await submitComposerText('explicit while persistence is pending');
++
++    expect(mockChatSend.mock.calls[0][0]).toMatchObject({ model: 'huggingface:org/model' });
++    expect(persist.promise).toBeInstanceOf(Promise);
++    await act(async () => persist.resolve({}));
++  });
++
++  it('lets a newly selected explicit model send after an earlier clear fails', async () => {
++    const clear = deferred<unknown>();
++    mockModelSettingsWrites({ 'huggingface:org/model': Promise.resolve({}), '': clear.promise });
++    await renderChat('text');
++    await selectPickerModel();
++    await clearPickerModel();
++    await clickSendButtonWithDraft('blocked default draft');
++    await act(async () => clear.reject(new Error('clear failed')));
++    expect(mockChatSend).not.toHaveBeenCalled();
++
++    await selectPickerModel();
++    await submitComposerText('new explicit route');
++
++    expect(mockChatSend.mock.calls[0][0]).toMatchObject({ model: 'huggingface:org/model' });
++  });
++
++  it('serializes a pending selection before a later clear', async () => {
++    const selection = deferred<unknown>();
++    const clear = deferred<unknown>();
++    mockModelSettingsWrites({ 'huggingface:org/model': selection.promise, '': clear.promise });
++    await renderChat('text');
++    await selectPickerModel();
++    await clearPickerModel();
++
++    await clickSendButtonWithDraft('clear wins');
++    expect(mockChatSend).not.toHaveBeenCalled();
++
++    await act(async () => selection.resolve({}));
++    expect(mockChatSend).not.toHaveBeenCalled();
++    await act(async () => clear.resolve({}));
++    await waitFor(() => expect(mockChatSend).toHaveBeenCalledTimes(1));
++    expect(mockChatSend.mock.calls[0][0]).not.toHaveProperty('model');
++  });
++
+   it('leaves the persisted model to the core for a normal send by default', async () => {
+     mockChatSend.mockClear();
+     await renderChat('text');
+diff --git a/app/src/features/conversations/Conversations.tsx b/app/src/features/conversations/Conversations.tsx
+index 412a19e32d..2def36e750 100644
+--- a/app/src/features/conversations/Conversations.tsx
++++ b/app/src/features/conversations/Conversations.tsx
+@@ -322,6 +322,7 @@ const Conversations = ({
+   // that contributes to "Maximum update depth exceeded" (TAURI-REACT-2G).
+   const sendErrorRef = useRef(sendError);
+   sendErrorRef.current = sendError;
++  const preserveSendErrorForRestoredDraftRef = useRef(false);
+   const createThreadErrorRef = useRef(createThreadError);
+   createThreadErrorRef.current = createThreadError;
+   const displayedSendError = deriveChatErrorBanner(
+@@ -446,6 +447,8 @@ const Conversations = ({
+   // (the same field Settings → Routing → "Default model" edits). `null` clears
+   // the pin back to the managed default.
+   const [composerModelOverride, setComposerModelOverride] = useState<string | null>(null);
++  const modelSettingsWriteQueueRef = useRef<Promise<void>>(Promise.resolve());
++  const composerModelClearBarrierRef = useRef<Promise<void> | null>(null);
+   // `undefined` means no explicit picker selection, so usage-reported context
+   // remains authoritative. `null` means the selected model did not report a
+   // window, and the meter deliberately shows an unknown limit.
+@@ -491,19 +494,38 @@ const Conversations = ({
+   const applyComposerModel = useCallback((value: string | null, contextWindow?: number | null) => {
+     setComposerModelOverride(value);
+     setComposerModelContextWindow(contextWindow ?? null);
+-    void callCoreRpc({
+-      method: 'openhuman.inference_update_model_settings',
+-      params: { default_model: value ?? '' },
+-    })
+-      .then(() => {
++    const write = modelSettingsWriteQueueRef.current
++      .catch(() => undefined)
++      .then(() =>
++        callCoreRpc({
++          method: 'openhuman.inference_update_model_settings',
++          params: { default_model: value ?? '' },
++        })
++      );
++    modelSettingsWriteQueueRef.current = write.then(
++      () => undefined,
++      () => undefined
++    );
++    void write.then(
++      () => {
+         console.debug('[chat][composer-model] persisted default_model', { pinned: value !== null });
+-      })
+-      .catch((err: unknown) => {
++      },
++      (err: unknown) => {
+         // The in-session override still applies; only persistence failed.
+         console.warn('[chat][composer-model] failed to persist default_model', {
+           message: err instanceof Error ? err.message : String(err),
+         });
+-      });
++      }
++    );
++    if (value === null) {
++      const clearBarrier = write.then(() => undefined);
++      composerModelClearBarrierRef.current = clearBarrier;
++      // Keep the rejected promise available to a default send while marking it
++      // handled immediately, even if the user never submits another message.
++      void clearBarrier.catch(() => undefined);
++    } else {
++      composerModelClearBarrierRef.current = null;
++    }
+   }, []);
+ 
+   useEffect(() => {
+@@ -786,7 +808,9 @@ const Conversations = ({
+   }, []);
+ 
+   useEffect(() => {
+-    if (sendErrorRef.current && inputValue.length > 0) {
++    if (preserveSendErrorForRestoredDraftRef.current) {
++      preserveSendErrorForRestoredDraftRef.current = false;
++    } else if (sendErrorRef.current && inputValue.length > 0) {
+       setSendError(null);
+     }
+     // The store-recorded create failure (#5156) dismisses on the same signal:
+@@ -1153,6 +1177,8 @@ const Conversations = ({
+     addPendingSendingThread(sendingThreadId);
+     const pendingAttachments = attachments.slice();
+     const modelOverride = composerModelOverride ?? undefined;
++    const modelClearBarrier =
++      modelOverride === undefined ? composerModelClearBarrierRef.current : null;
+     let messageText = buildMessageWithAttachments(trimmed, pendingAttachments);
+     const userMessage: ThreadMessage = {
+       id: `msg_${globalThis.crypto.randomUUID()}`,
+@@ -1164,6 +1190,17 @@ const Conversations = ({
+     };
+ 
+     try {
++      if (modelClearBarrier) {
++        try {
++          await modelClearBarrier;
++        } catch (error) {
++          // assistant-ui clears its composer when `onNew` resolves, so restore
++          // this draft when the clear barrier prevents the send from starting.
++          preserveSendErrorForRestoredDraftRef.current = true;
++          setInputValue(normalized);
++          throw error;
++        }
++      }
+       const persisted = await dispatch(
+         addMessageLocal({ threadId: sendingThreadId, message: userMessage })
+       ).unwrap();
+@@ -1271,6 +1308,8 @@ const Conversations = ({
+     if (!normalized && pendingAttachments.length === 0) return;
+ 
+     const modelOverride = composerModelOverride ?? undefined;
++    const modelClearBarrier =
++      modelOverride === undefined ? composerModelClearBarrierRef.current : null;
+     const messageText = buildMessageWithAttachments(normalized, pendingAttachments);
+     // Build the full user message exactly like a normal send (content +
+     // attachment metadata) so the follow-up persists identically when it is
+@@ -1293,6 +1332,14 @@ const Conversations = ({
+     setAttachError(null);
+ 
+     try {
++      if (modelClearBarrier) {
++        try {
++          await modelClearBarrier;
++        } catch (error) {
++          preserveSendErrorForRestoredDraftRef.current = true;
++          throw error;
++        }
++      }
+       await chatSend({
+         threadId,
+         message: messageText,
+diff --git a/crates/openhuman-core/src/inference/provider/factory/managed_backend.rs b/crates/openhuman-core/src/inference/provider/factory/managed_backend.rs
+index dd0a4c4050..352aea1879 100644
+--- a/crates/openhuman-core/src/inference/provider/factory/managed_backend.rs
++++ b/crates/openhuman-core/src/inference/provider/factory/managed_backend.rs
+@@ -46,6 +46,10 @@ pub(super) fn resolve_managed_backend_with_model_override(
+     config: &Config,
+     model_override: Option<&str>,
+ ) -> anyhow::Result<(OpenHumanBackendModel, String)> {
++    // Managed construction shares the same privacy gate as local and BYOK
++    // factories, before constructing a client or announcing any egress.
++    enforce_local_only_inference(role, PROVIDER_OPENHUMAN)?;
++
+     // Every managed role runs on one concrete model: the pinned default, else
+     // `MODEL_MANAGED_DEFAULT`. Roles still matter — they picked the *route*
+     // that led here — but there are no per-role tier endpoints any more.
+diff --git a/crates/openhuman-core/src/inference/provider/factory_crate_native_tests.rs b/crates/openhuman-core/src/inference/provider/factory_crate_native_tests.rs
+index f904ab8be0..6ac7324903 100644
+--- a/crates/openhuman-core/src/inference/provider/factory_crate_native_tests.rs
++++ b/crates/openhuman-core/src/inference/provider/factory_crate_native_tests.rs
+@@ -58,6 +58,28 @@ fn enforce_local_only_inference_errors_on_external_when_local_only() {
+         .to_string()
+         .contains("Local-only privacy mode"));
+ 
++    // Both the default factory and a thread-attached managed picker route must
++    // hit the managed resolver's privacy gate before any backend client exists.
++    for route in ["openhuman", "openrouter/author/picked-model:free"] {
++        let result = if route == "openhuman" {
++            create_chat_model_from_string("chat", route, &Config::default(), 0.0)
++        } else {
++            managed_backend::make_openhuman_backend_model_for_thread(
++                "chat",
++                &Config::default(),
++                route,
++                true,
++                Some("privacy-test-thread"),
++            )
++            .map(|(model, _)| model)
++        };
++        let error = match result {
++            Err(error) => error,
++            Ok(_) => panic!("managed inference must be refused in LocalOnly mode"),
++        };
++        assert!(error.to_string().contains("Local-only privacy mode"));
++    }
++
+     // Local provider passes.
+     enforce_local_only_inference("chat", "ollama:llama3")
+         .expect("local provider must be permitted in LocalOnly mode");
+diff --git a/crates/openhuman-core/src/web_chat/README.md b/crates/openhuman-core/src/web_chat/README.md
+index 7d9d192270..4afb92f05d 100644
+--- a/crates/openhuman-core/src/web_chat/README.md
++++ b/crates/openhuman-core/src/web_chat/README.md
+@@ -27,7 +27,8 @@ runner behind both surfaces.
+    `APPROVAL_CHAT_CONTEXT` task-local scope all wrap the same future.
+ 4. `run_chat_task` checks the session `Agent` out of the per-thread cache
+    (`session.rs::checkout_session_agent`), reusing the `THREAD_SESSIONS` entry
+-   when its `SessionCacheFingerprint` still matches and otherwise building one
++   when its `SessionCacheFingerprint` (including the resolved effective model,
++   even without a picker override) still matches and otherwise building one
+    and cold-boot resuming it from the thread's `session_raw` transcript (or
+    the conversation log). A `Parallel` fork always builds a fresh agent and
+    never touches the cache. It then spawns [`spawn_progress_bridge`]
+diff --git a/crates/openhuman-core/src/web_chat/session.rs b/crates/openhuman-core/src/web_chat/session.rs
+index 29e25897b8..9f3db65c0c 100644
+--- a/crates/openhuman-core/src/web_chat/session.rs
++++ b/crates/openhuman-core/src/web_chat/session.rs
+@@ -263,6 +263,12 @@ pub(super) fn fingerprint_diff(
+             prior.model_override, next.model_override
+         ));
+     }
++    if prior.effective_model != next.effective_model {
++        diff.push(format!(
++            "effective_model: {} -> {}",
++            prior.effective_model, next.effective_model
++        ));
++    }
+     if prior.temperature != next.temperature {
+         diff.push(format!(
+             "temperature: {:?} -> {:?}",
+@@ -308,6 +314,10 @@ pub(super) fn build_session_fingerprint(
+     let effective = effective_session_config(config, model_override.as_deref(), temperature);
+     SessionCacheFingerprint {
+         model_override,
++        effective_model: crate::inference::provider::factory::resolve_model_for_hint(
++            &format!("hint:{provider_role}"),
++            &effective,
++        ),
+         temperature,
+         provider_binding: crate::inference::provider::provider_for_role(provider_role, &effective),
+         target_agent_id,
+diff --git a/crates/openhuman-core/src/web_chat/session_checkout_tests.rs b/crates/openhuman-core/src/web_chat/session_checkout_tests.rs
+index 782219d9c2..e94618d434 100644
+--- a/crates/openhuman-core/src/web_chat/session_checkout_tests.rs
++++ b/crates/openhuman-core/src/web_chat/session_checkout_tests.rs
+@@ -373,6 +373,7 @@ async fn a_thread_binds_one_stable_session_across_cold_boots() {
+ fn sample_fingerprint() -> SessionCacheFingerprint {
+     SessionCacheFingerprint {
+         model_override: Some("hint:chat".to_string()),
++        effective_model: "openrouter/author/model".to_string(),
+         temperature: Some(0.7),
+         target_agent_id: "orchestrator".to_string(),
+         provider_binding: "openhuman".to_string(),
+diff --git a/crates/openhuman-core/src/web_chat/session_routing_tests.rs b/crates/openhuman-core/src/web_chat/session_routing_tests.rs
+index 9f0360e0bd..40f4ed4593 100644
+--- a/crates/openhuman-core/src/web_chat/session_routing_tests.rs
++++ b/crates/openhuman-core/src/web_chat/session_routing_tests.rs
+@@ -298,3 +298,65 @@ fn temperature_override_is_turn_local_and_changes_the_cache_fingerprint() {
+     assert_ne!(cold, warm);
+     assert_eq!(serde_json::to_value(&config).unwrap(), snapshot);
+ }
++
++/// Settings changes must invalidate a warm managed chat even when the caller
++/// sends no model override and the provider binding stays managed.
++#[test]
++fn persisted_managed_model_changes_invalidate_the_session_fingerprint() {
++    let mut config = Config::default();
++    config.chat_provider = Some("openhuman".to_string());
++    config.default_model = Some("openrouter/author/first-model:free".to_string());
++    let fingerprint = |config: &Config, selection: Option<String>| {
++        super::build_session_fingerprint(
++            config,
++            selection,
++            None,
++            "orchestrator".to_string(),
++            "chat",
++        )
++    };
++    let first = fingerprint(&config, None);
++    config.default_model = Some("openrouter/author/second-model:free".to_string());
++    let second = fingerprint(&config, None);
++    assert_eq!(first.provider_binding, second.provider_binding);
++    assert_eq!(first.model_override, second.model_override);
++    assert_ne!(
++        first, second,
++        "the old cached agent must not survive a saved model change"
++    );
++    assert!(super::fingerprint_diff(&first, &second)
++        .iter()
++        .any(|field| field.starts_with("effective_model:")));
++    config.default_model = None;
++    assert_ne!(
++        second,
++        fingerprint(&config, None),
++        "clearing the pin restores the managed fallback"
++    );
++}
++
++/// A concrete picker choice still wins over a changing saved default; changing
++/// that unrelated default must not evict the agent built for the explicit pick.
++#[test]
++fn explicit_picker_model_keeps_its_fingerprint_when_saved_default_changes() {
++    let mut config = Config::default();
++    config.chat_provider = Some("openhuman".to_string());
++    config.default_model = Some("openrouter/author/first-model:free".to_string());
++    let selected = Some("openrouter/author/picked-model:free".to_string());
++    let first = super::build_session_fingerprint(
++        &config,
++        selected.clone(),
++        None,
++        "orchestrator".to_string(),
++        "chat",
++    );
++    config.default_model = Some("openrouter/author/second-model:free".to_string());
++    let second = super::build_session_fingerprint(
++        &config,
++        selected,
++        None,
++        "orchestrator".to_string(),
++        "chat",
++    );
++    assert_eq!(first, second);
++}
+diff --git a/crates/openhuman-core/src/web_chat/types.rs b/crates/openhuman-core/src/web_chat/types.rs
+index 14d5fe0515..92fc05bbb8 100644
+--- a/crates/openhuman-core/src/web_chat/types.rs
++++ b/crates/openhuman-core/src/web_chat/types.rs
+@@ -59,6 +59,9 @@ impl std::fmt::Display for QueueMode {
+ #[derive(PartialEq, Debug, Clone)]
+ pub(crate) struct SessionCacheFingerprint {
+     pub(super) model_override: Option<String>,
++    /// Resolved model selected by the effective configuration, including a
++    /// persisted managed default when no per-turn override was sent.
++    pub(super) effective_model: String,
+     pub(super) temperature: Option<f64>,
+     pub(super) target_agent_id: String,
+     pub(super) provider_binding: String,
+diff --git a/crates/openhuman-core/src/web_chat/web_tests.rs b/crates/openhuman-core/src/web_chat/web_tests.rs
+index 0e23843dcb..1619823249 100644
+--- a/crates/openhuman-core/src/web_chat/web_tests.rs
++++ b/crates/openhuman-core/src/web_chat/web_tests.rs
+@@ -61,6 +61,7 @@ fn fp(
+ ) -> SessionCacheFingerprint {
+     SessionCacheFingerprint {
+         model_override: model_override.map(String::from),
++        effective_model: "sample-model".to_string(),
+         temperature,
+         target_agent_id: target.to_string(),
+         provider_binding: provider_binding.to_string(),
+diff --git a/docs/RELEASE-MANUAL-SMOKE.md b/docs/RELEASE-MANUAL-SMOKE.md
+index 6e0fa7f1ea..18cc31e15a 100644
+--- a/docs/RELEASE-MANUAL-SMOKE.md
++++ b/docs/RELEASE-MANUAL-SMOKE.md
+@@ -90,6 +90,8 @@ Applies to every release, all platforms.
+ 
+ ### Cross-platform
+ 
++- [ ] **Chat model picker selects the provider as well as the model (#6938)** — In an isolated test profile, switch the same thread from managed to Ollama, then to a configured BYOK provider, and back to a managed catalog model (including a `:free` variant). Verify the actual request endpoint and model match each selection, configured background routes stay unchanged, and reopening the app restores the selected provider/model. Selecting a workload hint must retain its configured route.
++
+ - [ ] **Agent files land in a visible folder** — Ask the agent for a short document or deck. Expected: the file appears in `~/OpenHuman/projects/Files` under its title (not in `~/.openhuman`); **Show in folder** in the chat Files panel opens the file manager at it; Settings → Agent OS access → **Files folder** shows that path, **Show in folder** opens it, and choosing another folder sends the next file there while the earlier file still opens. On an upgraded install, files from before the upgrade have moved into the folder.
+ - [ ] **Caller-owned inference works without an OpenHuman session** — In a local workspace without an OpenHuman login, configure Ollama/LM Studio/MLX/oMLX/local-openai or an independently authenticated Claude Code/Agent SDK provider. Run chat and an agent flow routed entirely to that provider. For a named harness agent, also configure the summarization route to managed inference and verify that the agent still uses its local route; reversing those routes must retain the managed agent's session requirement. Expected: no OpenHuman session requirement. Select managed inference instead: it must still require a backend session. With LocalOnly privacy enabled, local runtimes remain allowed and Claude subprocesses remain blocked as external inference.
+ - [ ] **LocalOnly blocks remote search** — Configure a remote search provider and enable LocalOnly privacy. Invoke `web_search_tool` with a harmless query. Expected: the tool returns a policy-blocked result and does not dispatch to the provider. Switch privacy to Standard and confirm the same tool can complete.
+@@ -129,5 +131,3 @@ Notes:
+ ```
+ 
+ Paste the filled block as a commit comment on the `v<version>-staging` tagged commit before promoting to production.
+-
+-- [ ] **Chat model picker selects the provider as well as the model (#6938)** — In an isolated test profile, switch the same thread from managed to Ollama, then to a configured BYOK provider, and back to a managed catalog model (including a `:free` variant). Verify the actual request endpoint and model match each selection, configured background routes stay unchanged, and reopening the app restores the selected provider/model. Selecting a workload hint must retain its configured route.
+diff --git a/docs/TEST-COVERAGE-MATRIX.md b/docs/TEST-COVERAGE-MATRIX.md
+index 2973797e6f..bfacf30cb8 100644
+--- a/docs/TEST-COVERAGE-MATRIX.md
++++ b/docs/TEST-COVERAGE-MATRIX.md
+@@ -582,7 +582,7 @@ The thread JSONL store moved to `tinyagents_session::threads` (`vendor/tinyagent
+ 
+ | 13.3.8 | Managed default model (one OpenRouter model for every managed workload) | RU+RI | `crates/openhuman-core/src/inference/provider/factory_route_resolution_tests.rs` (`resolve_model_for_hint_maps_every_managed_hint_to_the_default_model`, `resolve_model_for_hint_uses_the_pinned_managed_default`, `resolve_model_for_hint_treats_retired_tier_slugs_as_role_aliases`), `crates/openhuman-core/src/inference/provider/factory_crate_native_tests.rs`, `crates/openhuman-core/src/agent/triage/routing_tests.rs`, `crates/openhuman-core/src/agent/cost_tests.rs`, `crates/openhuman-core/src/platform/cost/route_tests.rs`, `crates/openhuman-core/src/config/migrations/retire_managed_tier_slugs_tests.rs`, `crates/openhuman-core/src/config/migrations/mod_tests.rs` (`run_pending_v12_to_v13_*`), `tests/json_rpc_e2e.rs` (routing cases, flows arc) | ✅ | The `chat-v1`/`agentic-v1`/… tier endpoints are retired: every managed workload role resolves to `config.default_model` when it names a catalog model, else `openrouter/deepseek/deepseek-v4-flash`; `hint:*` and retired slugs stay role aliases; migration 12→13 rewrites persisted slugs; cost classification and the flash price row |
+ | 13.3.9 | Routing page: Default model row + per-workload tables always shown; providers header action | VU | `app/src/components/settings/panels/__tests__/AIPanel.test.tsx` (`shows the per-workload routing tables directly, with no mode selector`, `pins a managed default model from the routing page`), `app/src/services/api/__tests__/aiSettingsApi.test.ts` (`sends default_model only when the pinned default model changed`), `app/src/components/settings/panels/ai/ProviderModelPickerDialog.test.tsx` | ✅ | No Managed / Own / Advanced selector; the Default model row opens the managed catalog picker (list, alphabetical, search filters models) and persists `default_model`; "Add provider" lives in the page header |
+-| 13.3.10 | Composer model pick is the global default | PW | `app/test/playwright/specs/chat-model-managed-catalog.spec.ts` (`a composer pick is the global default and survives a fresh page`) | 🟡 | **Was ✅ against a spec that does not run**: `chat-model-managed-catalog.spec.ts:142` is `test.describe.skip` with `TODO(#6395): rebuild these assertions around the picker’s native model select`. The claim is unasserted at every layer until #6395 lands. Partially backstopped meanwhile by 13.3.1’s new PW case, which pins the same `default_model` contract from the settings route rather than the composer pill. Backend provider/model routing is covered by `web_chat::session::session_routing_tests` (managed/local/BYOK, restored defaults, suffixes, sibling isolation, effective cache binding); Composer send defaults and explicit picker overrides are additionally covered for normal and queued follow-up sends by `Conversations.processSourceCommand.test.tsx` (`composer model routing`); these checks do not replace the skipped picker UI assertion. |
++| 13.3.10 | Composer model pick is the global default | PW | `app/test/playwright/specs/chat-model-managed-catalog.spec.ts` (`a composer pick is the global default and survives a fresh page`) | 🟡 | The managed catalog suite is active; its individual `a composer pick is the global default and survives a fresh page` case remains `test.skip` under #6395. Catalog display is exercised, while composer persistence across a fresh page remains unasserted by that skipped case. Partially backstopped meanwhile by 13.3.1’s new PW case, which pins the same `default_model` contract from the settings route rather than the composer pill. Backend provider/model routing is covered by `web_chat::session::session_routing_tests` (managed/local/BYOK, restored defaults, suffixes, sibling isolation, effective cache binding); Composer send defaults and explicit picker overrides are additionally covered for normal and queued follow-up sends by `Conversations.processSourceCommand.test.tsx` (`composer model routing`); these checks do not replace the skipped persistence UI assertion. |
+ | 13.3.11 | Skills page (Installed → Registry) with run/edit/remove controls | VU | `app/src/components/skills/__tests__/SkillsExplorerTab.test.tsx` | ✅ | Page-owned header + tabs in the MCP page's shape: installed rows with Run / Edit / Remove icon controls, Install from URL and New skill; registry rows with search, source filter and Install |
+ 
+ ### 13.4 Developer Options
+diff --git a/tests/json_rpc_e2e.rs b/tests/json_rpc_e2e.rs
+index c902c90aff..8e0aa62040 100644
+--- a/tests/json_rpc_e2e.rs
++++ b/tests/json_rpc_e2e.rs
+@@ -4198,6 +4198,127 @@ async fn json_rpc_web_chat_custom_chat_provider_uses_stored_key_and_rebuilds_on_
+         Some("openrouter/deepseek/deepseek-v4-flash")
+     );
+ 
++    async fn assert_managed_turn(
++        rpc_base: &str,
++        request_id: i64,
++        client_id: &str,
++        thread_id: &str,
++        message: &str,
++        expected_model: &str,
++        model_override: Option<&str>,
++    ) {
++        let events_url = format!("{}/events?client_id={}", rpc_base, client_id);
++        let (sse_task, request_tx) =
++            spawn_ready_terminal_web_chat_event_for_request(&events_url).await;
++        let mut params = json!({
++            "client_id": client_id,
++            "thread_id": thread_id,
++            "message": message,
++        });
++        if let Some(model_override) = model_override {
++            params["model_override"] = json!(model_override);
++        }
++        let accepted =
++            post_json_rpc(rpc_base, request_id, "openhuman.channel_web_chat", params).await;
++        let accepted_result = assert_no_jsonrpc_error(&accepted, "channel_web_chat managed");
++        assert_eq!(
++            accepted_result
++                .get("result")
++                .and_then(|v| v.get("accepted")),
++            Some(&json!(true))
++        );
++        signal_accepted_web_chat_request_id(request_tx, accepted_result);
++        let sse_event = tokio::time::timeout(Duration::from_secs(12), sse_task)
++            .await
++            .expect("timed out waiting for managed chat_done")
++            .expect("managed sse join");
++        assert_eq!(
++            sse_event.get("event").and_then(Value::as_str),
++            Some("chat_done"),
++            "unexpected managed terminal event: {sse_event}"
++        );
++        let request = wait_for_chat_completion_request_with_message(message).await;
++        assert_eq!(
++            request.get("path").and_then(Value::as_str),
++            Some("/openai/v1/chat/completions")
++        );
++        assert_eq!(
++            request.get("model").and_then(Value::as_str),
++            Some(expected_model)
++        );
++        assert_eq!(
++            request.get("authorization").and_then(Value::as_str),
++            Some("Bearer e2e-test-jwt"),
++            "managed request must use the backend session credential"
++        );
++    }
++
++    let picker_model = "openrouter/author/picker-model:free";
++    assert_managed_turn(
++        &rpc_base,
++        6008,
++        client_id,
++        thread_id,
++        "Explicit managed picker model with warm BYOK session",
++        picker_model,
++        Some(picker_model),
++    )
++    .await;
++    let config_get = post_json_rpc(&rpc_base, 6009, "openhuman.config_get", json!({})).await;
++    let config_outer = assert_no_jsonrpc_error(&config_get, "config_get after managed override");
++    let config_payload = config_outer.get("result").unwrap_or(config_outer);
++    let config = config_payload.get("config").unwrap_or(config_payload);
++    assert_eq!(
++        config.get("chat_provider").and_then(Value::as_str),
++        Some("openai:gpt-4.1-nano"),
++        "a per-turn managed selection must not replace the configured BYOK provider"
++    );
++
++    let first_managed_default = "openrouter/author/first-default-model:free";
++    let update_first_default = post_json_rpc(
++        &rpc_base,
++        6010,
++        "openhuman.update_model_settings",
++        json!({ "default_model": first_managed_default }),
++    )
++    .await;
++    assert_no_jsonrpc_error(
++        &update_first_default,
++        "update_model_settings first managed default",
++    );
++    assert_managed_turn(
++        &rpc_base,
++        6011,
++        client_id,
++        thread_id,
++        "Managed default first route cache turn",
++        first_managed_default,
++        None,
++    )
++    .await;
++
++    let second_managed_default = "openrouter/author/second-default-model:free";
++    let update_second_default = post_json_rpc(
++        &rpc_base,
++        6012,
++        "openhuman.update_model_settings",
++        json!({ "default_model": second_managed_default }),
++    )
++    .await;
++    assert_no_jsonrpc_error(
++        &update_second_default,
++        "update_model_settings second managed default",
++    );
++    assert_managed_turn(
++        &rpc_base,
++        6013,
++        client_id,
++        thread_id,
++        "Managed default second route cache turn",
++        second_managed_default,
++        None,
++    )
++    .await;
+     mock_join.abort();
+     rpc_join.abort();
+ }

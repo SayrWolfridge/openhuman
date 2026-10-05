@@ -1,0 +1,103 @@
+diff --git a/crates/openhuman-core/src/inference/provider/factory_crate_native_tests.rs b/crates/openhuman-core/src/inference/provider/factory_crate_native_tests.rs
+index f904ab8be0..6ac7324903 100644
+--- a/crates/openhuman-core/src/inference/provider/factory_crate_native_tests.rs
++++ b/crates/openhuman-core/src/inference/provider/factory_crate_native_tests.rs
+@@ -58,6 +58,28 @@ fn enforce_local_only_inference_errors_on_external_when_local_only() {
+         .to_string()
+         .contains("Local-only privacy mode"));
+ 
++    // Both the default factory and a thread-attached managed picker route must
++    // hit the managed resolver's privacy gate before any backend client exists.
++    for route in ["openhuman", "openrouter/author/picked-model:free"] {
++        let result = if route == "openhuman" {
++            create_chat_model_from_string("chat", route, &Config::default(), 0.0)
++        } else {
++            managed_backend::make_openhuman_backend_model_for_thread(
++                "chat",
++                &Config::default(),
++                route,
++                true,
++                Some("privacy-test-thread"),
++            )
++            .map(|(model, _)| model)
++        };
++        let error = match result {
++            Err(error) => error,
++            Ok(_) => panic!("managed inference must be refused in LocalOnly mode"),
++        };
++        assert!(error.to_string().contains("Local-only privacy mode"));
++    }
++
+     // Local provider passes.
+     enforce_local_only_inference("chat", "ollama:llama3")
+         .expect("local provider must be permitted in LocalOnly mode");
+diff --git a/crates/openhuman-core/src/web_chat/session_routing_tests.rs b/crates/openhuman-core/src/web_chat/session_routing_tests.rs
+index 9f0360e0bd..40f4ed4593 100644
+--- a/crates/openhuman-core/src/web_chat/session_routing_tests.rs
++++ b/crates/openhuman-core/src/web_chat/session_routing_tests.rs
+@@ -298,3 +298,65 @@ fn temperature_override_is_turn_local_and_changes_the_cache_fingerprint() {
+     assert_ne!(cold, warm);
+     assert_eq!(serde_json::to_value(&config).unwrap(), snapshot);
+ }
++
++/// Settings changes must invalidate a warm managed chat even when the caller
++/// sends no model override and the provider binding stays managed.
++#[test]
++fn persisted_managed_model_changes_invalidate_the_session_fingerprint() {
++    let mut config = Config::default();
++    config.chat_provider = Some("openhuman".to_string());
++    config.default_model = Some("openrouter/author/first-model:free".to_string());
++    let fingerprint = |config: &Config, selection: Option<String>| {
++        super::build_session_fingerprint(
++            config,
++            selection,
++            None,
++            "orchestrator".to_string(),
++            "chat",
++        )
++    };
++    let first = fingerprint(&config, None);
++    config.default_model = Some("openrouter/author/second-model:free".to_string());
++    let second = fingerprint(&config, None);
++    assert_eq!(first.provider_binding, second.provider_binding);
++    assert_eq!(first.model_override, second.model_override);
++    assert_ne!(
++        first, second,
++        "the old cached agent must not survive a saved model change"
++    );
++    assert!(super::fingerprint_diff(&first, &second)
++        .iter()
++        .any(|field| field.starts_with("effective_model:")));
++    config.default_model = None;
++    assert_ne!(
++        second,
++        fingerprint(&config, None),
++        "clearing the pin restores the managed fallback"
++    );
++}
++
++/// A concrete picker choice still wins over a changing saved default; changing
++/// that unrelated default must not evict the agent built for the explicit pick.
++#[test]
++fn explicit_picker_model_keeps_its_fingerprint_when_saved_default_changes() {
++    let mut config = Config::default();
++    config.chat_provider = Some("openhuman".to_string());
++    config.default_model = Some("openrouter/author/first-model:free".to_string());
++    let selected = Some("openrouter/author/picked-model:free".to_string());
++    let first = super::build_session_fingerprint(
++        &config,
++        selected.clone(),
++        None,
++        "orchestrator".to_string(),
++        "chat",
++    );
++    config.default_model = Some("openrouter/author/second-model:free".to_string());
++    let second = super::build_session_fingerprint(
++        &config,
++        selected,
++        None,
++        "orchestrator".to_string(),
++        "chat",
++    );
++    assert_eq!(first, second);
++}
