@@ -1,0 +1,108 @@
+diff --git a/crates/openhuman-core/src/web_chat/session.rs b/crates/openhuman-core/src/web_chat/session.rs
+index 9f3db65c0c..42a9442a90 100644
+--- a/crates/openhuman-core/src/web_chat/session.rs
++++ b/crates/openhuman-core/src/web_chat/session.rs
+@@ -101,19 +101,21 @@ fn effective_session_config(
+             // The managed backend accepts catalog ids verbatim. This also
+             // clears a stale local/BYOK chat route from the effective clone.
+             effective.chat_provider = Some("openhuman".to_string());
+-        } else if let Some((provider, _)) = model.split_once(':') {
++        } else if let Some((provider, model_suffix)) = model.split_once(':') {
+             let provider = provider.trim();
+             let local_route = tinyinference_local::profile::is_local_provider_string(model);
+             let built_in_route = matches!(provider, "claude-code" | "claude_agent_sdk");
+-            let configured_cloud_provider = effective
++            if local_route || built_in_route {
++                // Keep the complete selected value for local and built-in routes.
++                effective.chat_provider = Some(model.to_string());
++            } else if let Some(entry) = effective
+                 .cloud_providers
+                 .iter()
+-                .any(|entry| entry.slug.eq_ignore_ascii_case(provider));
+-            if local_route || built_in_route || configured_cloud_provider {
+-                // Provider strings use the same `<slug>:<model>` grammar as
+-                // the normal inference factory; keep the full selection so
+-                // model ids containing additional colons remain intact.
+-                effective.chat_provider = Some(model.to_string());
++                .find(|entry| entry.slug.eq_ignore_ascii_case(provider))
++            {
++                // The factory matches configured slugs exactly; preserve its canonical slug
++                // while keeping the full selected model suffix, including extra colons.
++                effective.chat_provider = Some(format!("{}:{model_suffix}", entry.slug));
+             }
+         }
+     }
+diff --git a/crates/openhuman-core/src/web_chat/session_routing_tests.rs b/crates/openhuman-core/src/web_chat/session_routing_tests.rs
+index 40f4ed4593..32db45471f 100644
+--- a/crates/openhuman-core/src/web_chat/session_routing_tests.rs
++++ b/crates/openhuman-core/src/web_chat/session_routing_tests.rs
+@@ -360,3 +360,69 @@ fn explicit_picker_model_keeps_its_fingerprint_when_saved_default_changes() {
+     );
+     assert_eq!(first, second);
+ }
++
++fn configured_huggingface_route() -> Config {
++    let mut config = Config::default();
++    config.chat_provider = Some("openai:gpt-4o".to_string());
++    config
++        .cloud_providers
++        .push(crate::config::schema::CloudProviderCreds {
++            id: "p_huggingface".to_string(),
++            slug: "huggingface".to_string(),
++            label: "Hugging Face".to_string(),
++            endpoint: "http://127.0.0.1:1/v1".to_string(),
++            auth_style: crate::config::schema::cloud_providers::AuthStyle::None,
++            ..Default::default()
++        });
++    config
++}
++
++fn assert_huggingface_model_builds(config: &Config, expected_model: &str) {
++    let (_, resolved_model) =
++        crate::inference::provider::factory::create_chat_model_with_model_id("chat", config, 0.0)
++            .expect("case-insensitive cloud selection should resolve through its configured slug");
++    assert_eq!(resolved_model, expected_model);
++}
++
++#[test]
++fn mixed_case_cloud_picker_uses_configured_slug_and_preserves_colon_suffix() {
++    let _guard = crate::inference::inference_test_guard();
++    let config = configured_huggingface_route();
++    let original = serde_json::to_value(&config).expect("config serializes");
++    let selected = "HuggingFace:org/model:version:variant";
++    let effective = effective_session_config(&config, Some(selected), None);
++
++    assert_eq!(
++        effective.chat_provider.as_deref(),
++        Some("huggingface:org/model:version:variant")
++    );
++    assert_eq!(effective.default_model.as_deref(), Some(selected));
++    assert_huggingface_model_builds(&effective, "org/model:version:variant");
++    assert_eq!(
++        serde_json::to_value(&config).expect("config serializes"),
++        original,
++        "picker selection must remain turn-local"
++    );
++}
++
++#[test]
++fn persisted_mixed_case_cloud_default_uses_configured_slug_after_restart() {
++    let _guard = crate::inference::inference_test_guard();
++    let mut config = configured_huggingface_route();
++    let selected = "HUGGINGFACE:org/model:version:variant";
++    config.default_model = Some(selected.to_string());
++    let original = serde_json::to_value(&config).expect("config serializes");
++    let effective = effective_session_config(&config, None, None);
++
++    assert_eq!(
++        effective.chat_provider.as_deref(),
++        Some("huggingface:org/model:version:variant")
++    );
++    assert_eq!(effective.default_model.as_deref(), Some(selected));
++    assert_huggingface_model_builds(&effective, "org/model:version:variant");
++    assert_eq!(
++        serde_json::to_value(&config).expect("config serializes"),
++        original,
++        "restoring a persisted picker default must remain turn-local"
++    );
++}
