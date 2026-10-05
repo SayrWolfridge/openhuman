@@ -143,4 +143,4 @@ jobs:
         run: pnpm --filter openhuman-app compile
       - name: Run affected conversation tests
         working-directory: app
-        run: pnpm exec vitest run src/pages/__tests__/Conversations.render.test.tsx src/features/conversations/Conversations.processSourceCommand.test.tsx
+        run: pnpm test src/pages/__tests__/Conversations.render.test.tsx src/features/conversations/Conversations.processSourceCommand.test.tsx
