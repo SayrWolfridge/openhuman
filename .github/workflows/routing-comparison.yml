@@ -1,4 +1,4 @@
-name: Routing baseline comparison
+name: Routing review diagnostics
 on:
   push:
     branches: [codex/routing-ci-comparison]
@@ -7,168 +7,49 @@ permissions:
   contents: read
   actions: read
 jobs:
-  compare:
-    if: ${{ !contains(github.event.head_commit.message, 'coverage reports only') && !contains(github.event.head_commit.message, 'frontend verification') }}
+  environment:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 8
     strategy:
       fail-fast: false
       matrix:
         include:
           - label: base
-            revision: d0d1e51eaed715dce78e332f84010784aead84a0
+            revision: 6c8c7ad93f1a66067c22bff382b9ddcf306294cd
           - label: candidate
-            revision: 964e79ab91a01e4684046e064b4a7122422ec637
-    runs-on: ubuntu-22.04
-    timeout-minutes: 90
+            revision: aed298d08c844e4c48fb5f4451012d8029fe18d8
+          - label: merge
+            revision: e787118f51cf87cef1d007bde36f3f8735d96bb1
     container:
       image: ghcr.io/tinyhumansai/openhuman_ci@sha256:c3c20d625bcc9f75e50c3c2c2b75c88d3e60a3f4352b0f19f5327b490438722d
     defaults:
       run:
         shell: bash
-    env:
-      CARGO_BUILD_JOBS: '1'
-      CARGO_INCREMENTAL: '0'
-      CARGO_PROFILE_DEV_DEBUG: '0'
-      RUST_MIN_STACK: '67108864'
-      OH_COV_DOCTESTS: '0'
-      OH_COV_TUI: '0'
-      OUT: ci-out/lcov/lcov-core.info
-      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v7
         with:
-          repository: SayrWolfridge/openhuman
           ref: ${{ matrix.revision }}
-          fetch-depth: 0
-          submodules: false
           persist-credentials: false
-      - name: Initialize canonical submodules
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          path: diagnostic-inputs
+          persist-credentials: false
+      - name: Capture startup with no frontend dependencies
         run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          bash scripts/ci/checkout-submodules.sh
-      - name: Record exact inputs
+          mkdir -p ci-out
+          python diagnostic-inputs/.github/diagnostics/mock-startup.py | tee ci-out/before-cleanup.json
+          sha256sum scripts/mock-api-server.mjs scripts/mock-api-core.mjs > ci-out/mock-hashes.txt
+          { command -v node; command -v cargo; readlink -f "$(command -v cargo)"; rustup show active-toolchain; } > ci-out/toolchain.txt 2>&1
+      - name: Apply canonical hosted disk cleanup
         run: |
-          mkdir -p ci-out/lcov
-          { git rev-parse HEAD; rustc -V; cargo -V; git submodule status --recursive; } > ci-out/inputs.txt
-      - name: Linux TLS lockfile policy
-        continue-on-error: true
-        run: |
-          set -o pipefail
-          bash scripts/check-linux-tls-dependencies.sh 2>&1 | tee ci-out/tls.log
-      - name: Module pins
-        continue-on-error: true
-        run: |
-          set -o pipefail
-          bash scripts/ci/fetch-submodule-tags.sh
-          node scripts/ci/check-module-pins.mjs 2>&1 | tee ci-out/pins.log
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - name: Install canonical test modules
-        run: |
-          bash scripts/ci/self-hosted/install-test-modules.sh "/opt/openhuman-test-modules/${GITHUB_RUN_ID}-${{ matrix.label }}" ci-out/test-modules.env
-          find "/opt/openhuman-test-modules/${GITHUB_RUN_ID}-${{ matrix.label }}" -name '*.so' -exec sha256sum {} + > ci-out/module-hashes.txt
-      - name: Canonical Rust coverage suite
-        continue-on-error: true
-        run: |
-          set -o pipefail
-          set -a
-          source ci-out/test-modules.env
-          set +a
-          bash scripts/ci/rust-coverage.sh 2>&1 | tee ci-out/rust.log
+          rm -rf /__t/* || true
+          df -h /__w || true
+      - name: Capture startup after canonical hosted cleanup
+        run: python diagnostic-inputs/.github/diagnostics/mock-startup.py | tee ci-out/after-cleanup.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
-          name: comparison-${{ matrix.label }}
+          name: review-environment-${{ matrix.label }}
           path: ci-out/
-          retention-days: 14
-          if-no-files-found: warn
-
-  coverage-report:
-    if: contains(github.event.head_commit.message, 'coverage reports only')
-    runs-on: ubuntu-22.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: aed298d08c844e4c48fb5f4451012d8029fe18d8
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-        with:
-          name: comparison-candidate
-          run-id: 37211888605
-          github-token: ${{ github.token }}
-          path: coverage-inputs/rust
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-        with:
-          name: routing-current-main-verification
-          run-id: 37305620761
-          github-token: ${{ github.token }}
-          path: coverage-inputs/frontend
-      - name: Verify unchanged Rust coverage source
-        run: git diff --exit-code 964e79ab91a01e4684046e064b4a7122422ec637 HEAD -- crates/openhuman-core/src/web_chat/session.rs crates/openhuman-core/src/web_chat/session_routing_tests.rs
-      - name: Install canonical coverage tool
-        run: python -m pip install 'diff-cover>=9.2.0'
-      - name: Measure changed-line coverage
-        run: |
-          find coverage-inputs -type f -name '*.info' -exec sed -i 's|/__w/openhuman/openhuman/||g' {} +
-          find coverage-inputs/frontend -type f -name '*.info' -exec sed -i 's|^SF:src/|SF:app/src/|' {} +
-          bash scripts/ci/self-hosted/diff-cover.sh coverage-inputs 6c8c7ad93f1a66067c22bff382b9ddcf306294cd diff-cover
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        if: always()
-        with:
-          name: routing-current-main-diff-coverage
-          path: diff-cover/
-          retention-days: 14
-
-  frontend-verification:
-    if: contains(github.event.head_commit.message, 'frontend verification')
-    runs-on: ubuntu-22.04
-    timeout-minutes: 25
-    container:
-      image: ghcr.io/tinyhumansai/openhuman_ci@sha256:c3c20d625bcc9f75e50c3c2c2b75c88d3e60a3f4352b0f19f5327b490438722d
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: aed298d08c844e4c48fb5f4451012d8029fe18d8
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Prepare canonical dependencies
-        run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          bash scripts/ci/checkout-submodules.sh
-          pnpm install --frozen-lockfile
-      - name: Compile all frontend types
-        run: pnpm --filter openhuman-app compile
-      - name: Run affected conversation tests
-        working-directory: app
-        run: pnpm test --coverage --coverage.include=src/features/conversations/Conversations.tsx src/pages/__tests__/Conversations.render.test.tsx src/features/conversations/Conversations.processSourceCommand.test.tsx
-
-      - name: Check changed frontend formatting
-        working-directory: app
-        run: pnpm exec prettier --check src/features/conversations/Conversations.tsx src/pages/__tests__/Conversations.render.test.tsx src/features/conversations/Conversations.processSourceCommand.test.tsx
-      - name: Verify unchanged covered Rust source
-        run: git diff --exit-code 964e79ab91a01e4684046e064b4a7122422ec637 HEAD -- crates/openhuman-core/src/web_chat/session.rs crates/openhuman-core/src/web_chat/session_routing_tests.rs
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-        with:
-          name: comparison-candidate
-          run-id: 37211888605
-          github-token: ${{ github.token }}
-          path: coverage-inputs/rust
-      - name: Install canonical coverage tool
-        run: python -m pip install 'diff-cover>=9.2.0'
-      - name: Measure changed-line coverage on current base
-        run: |
-          mkdir -p coverage-inputs/frontend
-          cp app/coverage/lcov.info coverage-inputs/frontend/lcov.info
-          find coverage-inputs -type f -name '*.info' -exec sed -i 's|/__w/openhuman/openhuman/||g' {} +
-          bash scripts/ci/self-hosted/diff-cover.sh coverage-inputs 6c8c7ad93f1a66067c22bff382b9ddcf306294cd diff-cover
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        if: always()
-        with:
-          name: routing-current-main-verification
-          path: |
-            diff-cover/
-            app/coverage/lcov.info
           retention-days: 14
