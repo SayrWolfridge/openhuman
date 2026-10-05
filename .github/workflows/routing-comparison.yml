@@ -38,7 +38,7 @@ jobs:
       - name: Capture startup with no frontend dependencies
         run: |
           mkdir -p ci-out
-          python diagnostic-inputs/.github/diagnostics/mock-startup.py | tee ci-out/before-cleanup.json
+          python3 diagnostic-inputs/.github/diagnostics/mock-startup.py | tee ci-out/before-cleanup.json
           sha256sum scripts/mock-api-server.mjs scripts/mock-api-core.mjs > ci-out/mock-hashes.txt
           { command -v node; command -v cargo; readlink -f "$(command -v cargo)"; rustup show active-toolchain; } > ci-out/toolchain.txt 2>&1
       - name: Apply canonical hosted disk cleanup
@@ -46,7 +46,7 @@ jobs:
           rm -rf /__t/* || true
           df -h /__w || true
       - name: Capture startup after canonical hosted cleanup
-        run: python diagnostic-inputs/.github/diagnostics/mock-startup.py | tee ci-out/after-cleanup.json
+        run: python3 diagnostic-inputs/.github/diagnostics/mock-startup.py | tee ci-out/after-cleanup.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
