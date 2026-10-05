@@ -8,7 +8,7 @@ permissions:
   actions: read
 jobs:
   compare:
-    if: ${{ !contains(github.event.head_commit.message, 'coverage reports only') }}
+    if: ${{ !contains(github.event.head_commit.message, 'coverage reports only') && !contains(github.event.head_commit.message, 'frontend verification') }}
     strategy:
       fail-fast: false
       matrix:
@@ -118,3 +118,29 @@ jobs:
           name: routing-diff-coverage
           path: diff-cover/
           retention-days: 14
+
+  frontend-verification:
+    if: contains(github.event.head_commit.message, 'frontend verification')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    container:
+      image: ghcr.io/tinyhumansai/openhuman_ci@sha256:c3c20d625bcc9f75e50c3c2c2b75c88d3e60a3f4352b0f19f5327b490438722d
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 74c0ba671ec6c22a84b6b0fd2a70127d153d44e8
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Prepare canonical dependencies
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          bash scripts/ci/checkout-submodules.sh
+          pnpm install --frozen-lockfile
+      - name: Compile all frontend types
+        run: pnpm --filter openhuman-app compile
+      - name: Run affected conversation tests
+        working-directory: app
+        run: pnpm exec vitest run src/pages/__tests__/Conversations.render.test.tsx src/features/conversations/Conversations.processSourceCommand.test.tsx
