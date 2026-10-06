@@ -1,0 +1,340 @@
+diff --git a/app/src/features/conversations/Conversations.processSourceCommand.test.tsx b/app/src/features/conversations/Conversations.processSourceCommand.test.tsx
+index 95af932afd..cb198d690e 100644
+--- a/app/src/features/conversations/Conversations.processSourceCommand.test.tsx
++++ b/app/src/features/conversations/Conversations.processSourceCommand.test.tsx
+@@ -265,11 +265,13 @@ function deferred<T>() {
+   return { promise, resolve, reject };
+ }
+ 
+-function mockModelSettingsWrites(writes: Record<string, Promise<unknown>>) {
++function mockModelSettingsWrites(writes: Record<string, Promise<unknown> | Promise<unknown>[]>) {
+   vi.mocked(callCoreRpc).mockImplementation(({ method, params }) => {
+     if (method === 'openhuman.inference_update_model_settings') {
+       const defaultModel = (params as { default_model: string }).default_model;
+-      return (writes[defaultModel] ?? Promise.resolve({})) as ReturnType<typeof callCoreRpc>;
++      const writesForValue = writes[defaultModel];
++      const write = Array.isArray(writesForValue) ? writesForValue.shift() : writesForValue;
++      return (write ?? Promise.resolve({})) as ReturnType<typeof callCoreRpc>;
+     }
+     return Promise.resolve({}) as ReturnType<typeof callCoreRpc>;
+   });
+@@ -465,6 +467,96 @@ describe('composer model routing', () => {
+     expect(mockChatSend).not.toHaveBeenCalled();
+   });
+ 
++  it.each([
++    { label: 'normal send', followup: false },
++    { label: 'follow-up send', followup: true },
++  ])(
++    'retries a rejected clear on later default $label attempts until one succeeds',
++    async ({ followup }) => {
++      const firstClear = deferred<unknown>();
++      const secondClear = deferred<unknown>();
++      const thirdClear = deferred<unknown>();
++      mockModelSettingsWrites({
++        'huggingface:org/model': Promise.resolve({}),
++        '': [firstClear.promise, secondClear.promise, thirdClear.promise],
++      });
++      await renderChat('text', false, followup);
++      await selectPickerModel();
++      await clearPickerModel();
++
++      const clearCalls = () =>
++        vi.mocked(callCoreRpc).mock.calls.filter(([request]) => {
++          const params = request.params as { default_model?: string };
++          return (
++            request.method === 'openhuman.inference_update_model_settings' &&
++            params.default_model === ''
++          );
++        });
++
++      await clickSendButtonWithDraft('first blocked attempt');
++      expect(clearCalls()).toHaveLength(1);
++      await act(async () => firstClear.reject(new Error('clear unavailable')));
++      expect(mockChatSend).not.toHaveBeenCalled();
++      expect(screen.getByRole('textbox')).toHaveTextContent('first blocked attempt');
++
++      await clickSendButtonWithDraft('second blocked attempt');
++      await waitFor(() => expect(clearCalls()).toHaveLength(2));
++      expect(mockChatSend).not.toHaveBeenCalled();
++      expect(threadApi.appendMessage).not.toHaveBeenCalled();
++      await act(async () => secondClear.reject(new Error('clear still unavailable')));
++      expect(mockChatSend).not.toHaveBeenCalled();
++      expect(screen.getByRole('textbox')).toHaveTextContent('second blocked attempt');
++
++      await clickSendButtonWithDraft('third attempt');
++      await waitFor(() => expect(clearCalls()).toHaveLength(3));
++      expect(mockChatSend).not.toHaveBeenCalled();
++      expect(threadApi.appendMessage).not.toHaveBeenCalled();
++      await act(async () => thirdClear.resolve({}));
++
++      await waitFor(() => expect(mockChatSend).toHaveBeenCalledTimes(1));
++      expect(mockChatSend.mock.calls[0][0]).not.toHaveProperty('model');
++      if (followup) {
++        expect(mockChatSend.mock.calls[0][0]).toMatchObject({ queueMode: 'followup' });
++      } else {
++        expect(mockChatSend.mock.calls[0][0]).not.toHaveProperty('queueMode');
++      }
++    }
++  );
++
++  it('waits on the newer clear when an older clear fails late', async () => {
++    const olderClear = deferred<unknown>();
++    const newerClear = deferred<unknown>();
++    mockModelSettingsWrites({
++      'huggingface:org/model': Promise.resolve({}),
++      '': [olderClear.promise, newerClear.promise],
++    });
++    await renderChat('text');
++    await selectPickerModel();
++    await clearPickerModel();
++    await clearPickerModel();
++
++    const clearCalls = () =>
++      vi.mocked(callCoreRpc).mock.calls.filter(([request]) => {
++        const params = request.params as { default_model?: string };
++        return (
++          request.method === 'openhuman.inference_update_model_settings' &&
++          params.default_model === ''
++        );
++      });
++
++    await clickSendButtonWithDraft('wait for latest clear');
++    expect(clearCalls()).toHaveLength(1);
++    expect(mockChatSend).not.toHaveBeenCalled();
++
++    await act(async () => olderClear.reject(new Error('older clear failed late')));
++    await waitFor(() => expect(clearCalls()).toHaveLength(2));
++    expect(mockChatSend).not.toHaveBeenCalled();
++
++    await act(async () => newerClear.resolve({}));
++    await waitFor(() => expect(mockChatSend).toHaveBeenCalledTimes(1));
++    expect(mockChatSend.mock.calls[0][0]).not.toHaveProperty('model');
++  });
++
+   it('does not wait for selected-model persistence before an explicit-model send', async () => {
+     const persist = deferred<unknown>();
+     mockModelSettingsWrites({ 'huggingface:org/model': persist.promise });
+diff --git a/app/src/features/conversations/Conversations.tsx b/app/src/features/conversations/Conversations.tsx
+index 2def36e750..61ef4a38eb 100644
+--- a/app/src/features/conversations/Conversations.tsx
++++ b/app/src/features/conversations/Conversations.tsx
+@@ -155,6 +155,11 @@ interface ConversationsProps {
+   projectThreadList?: boolean;
+ }
+ 
++type ComposerModelClearBarrier = {
++  promise: Promise<void>;
++  status: 'pending' | 'resolved' | 'rejected';
++};
++
+ // Stable empty reference so the `activeThreadIds` selector returns the same
+ // object identity when the slice field is absent (narrow test stores),
+ // avoiding spurious re-renders.
+@@ -448,7 +453,7 @@ const Conversations = ({
+   // the pin back to the managed default.
+   const [composerModelOverride, setComposerModelOverride] = useState<string | null>(null);
+   const modelSettingsWriteQueueRef = useRef<Promise<void>>(Promise.resolve());
+-  const composerModelClearBarrierRef = useRef<Promise<void> | null>(null);
++  const composerModelClearBarrierRef = useRef<ComposerModelClearBarrier | null>(null);
+   // `undefined` means no explicit picker selection, so usage-reported context
+   // remains authoritative. `null` means the selected model did not report a
+   // window, and the meter deliberately shows an unknown limit.
+@@ -491,9 +496,7 @@ const Conversations = ({
+         });
+       });
+   }, []);
+-  const applyComposerModel = useCallback((value: string | null, contextWindow?: number | null) => {
+-    setComposerModelOverride(value);
+-    setComposerModelContextWindow(contextWindow ?? null);
++  const persistComposerModelSettings = useCallback((value: string | null) => {
+     const write = modelSettingsWriteQueueRef.current
+       .catch(() => undefined)
+       .then(() =>
+@@ -517,17 +520,49 @@ const Conversations = ({
+         });
+       }
+     );
+-    if (value === null) {
+-      const clearBarrier = write.then(() => undefined);
+-      composerModelClearBarrierRef.current = clearBarrier;
+-      // Keep the rejected promise available to a default send while marking it
+-      // handled immediately, even if the user never submits another message.
+-      void clearBarrier.catch(() => undefined);
+-    } else {
+-      composerModelClearBarrierRef.current = null;
+-    }
++    return write;
+   }, []);
+ 
++  const startComposerModelClear = useCallback(() => {
++    let barrier!: ComposerModelClearBarrier;
++    const promise = persistComposerModelSettings(null).then(
++      () => {
++        barrier.status = 'resolved';
++      },
++      error => {
++        barrier.status = 'rejected';
++        throw error;
++      }
++    );
++    barrier = { promise, status: 'pending' };
++    composerModelClearBarrierRef.current = barrier;
++    // Keep a failed clear available for the next explicit send retry while
++    // marking the rejection handled if the user does not submit again.
++    void promise.catch(() => undefined);
++    return promise;
++  }, [persistComposerModelSettings]);
++
++  const waitForComposerModelClear = useCallback(() => {
++    const barrier = composerModelClearBarrierRef.current;
++    if (!barrier) return null;
++    if (barrier.status === 'rejected') return startComposerModelClear();
++    return barrier.promise;
++  }, [startComposerModelClear]);
++
++  const applyComposerModel = useCallback(
++    (value: string | null, contextWindow?: number | null) => {
++      setComposerModelOverride(value);
++      setComposerModelContextWindow(contextWindow ?? null);
++      if (value === null) {
++        void startComposerModelClear();
++      } else {
++        composerModelClearBarrierRef.current = null;
++        void persistComposerModelSettings(value);
++      }
++    },
++    [persistComposerModelSettings, startComposerModelClear]
++  );
++
+   useEffect(() => {
+     let cancelled = false;
+     (async () => {
+@@ -1177,8 +1212,7 @@ const Conversations = ({
+     addPendingSendingThread(sendingThreadId);
+     const pendingAttachments = attachments.slice();
+     const modelOverride = composerModelOverride ?? undefined;
+-    const modelClearBarrier =
+-      modelOverride === undefined ? composerModelClearBarrierRef.current : null;
++    const modelClearBarrier = modelOverride === undefined ? waitForComposerModelClear() : null;
+     let messageText = buildMessageWithAttachments(trimmed, pendingAttachments);
+     const userMessage: ThreadMessage = {
+       id: `msg_${globalThis.crypto.randomUUID()}`,
+@@ -1308,8 +1342,7 @@ const Conversations = ({
+     if (!normalized && pendingAttachments.length === 0) return;
+ 
+     const modelOverride = composerModelOverride ?? undefined;
+-    const modelClearBarrier =
+-      modelOverride === undefined ? composerModelClearBarrierRef.current : null;
++    const modelClearBarrier = modelOverride === undefined ? waitForComposerModelClear() : null;
+     const messageText = buildMessageWithAttachments(normalized, pendingAttachments);
+     // Build the full user message exactly like a normal send (content +
+     // attachment metadata) so the follow-up persists identically when it is
+diff --git a/crates/openhuman-core/src/web_chat/session.rs b/crates/openhuman-core/src/web_chat/session.rs
+index 9f3db65c0c..42a9442a90 100644
+--- a/crates/openhuman-core/src/web_chat/session.rs
++++ b/crates/openhuman-core/src/web_chat/session.rs
+@@ -101,19 +101,21 @@ fn effective_session_config(
+             // The managed backend accepts catalog ids verbatim. This also
+             // clears a stale local/BYOK chat route from the effective clone.
+             effective.chat_provider = Some("openhuman".to_string());
+-        } else if let Some((provider, _)) = model.split_once(':') {
++        } else if let Some((provider, model_suffix)) = model.split_once(':') {
+             let provider = provider.trim();
+             let local_route = tinyinference_local::profile::is_local_provider_string(model);
+             let built_in_route = matches!(provider, "claude-code" | "claude_agent_sdk");
+-            let configured_cloud_provider = effective
++            if local_route || built_in_route {
++                // Keep the complete selected value for local and built-in routes.
++                effective.chat_provider = Some(model.to_string());
++            } else if let Some(entry) = effective
+                 .cloud_providers
+                 .iter()
+-                .any(|entry| entry.slug.eq_ignore_ascii_case(provider));
+-            if local_route || built_in_route || configured_cloud_provider {
+-                // Provider strings use the same `<slug>:<model>` grammar as
+-                // the normal inference factory; keep the full selection so
+-                // model ids containing additional colons remain intact.
+-                effective.chat_provider = Some(model.to_string());
++                .find(|entry| entry.slug.eq_ignore_ascii_case(provider))
++            {
++                // The factory matches configured slugs exactly; preserve its canonical slug
++                // while keeping the full selected model suffix, including extra colons.
++                effective.chat_provider = Some(format!("{}:{model_suffix}", entry.slug));
+             }
+         }
+     }
+diff --git a/crates/openhuman-core/src/web_chat/session_routing_tests.rs b/crates/openhuman-core/src/web_chat/session_routing_tests.rs
+index 40f4ed4593..32db45471f 100644
+--- a/crates/openhuman-core/src/web_chat/session_routing_tests.rs
++++ b/crates/openhuman-core/src/web_chat/session_routing_tests.rs
+@@ -360,3 +360,69 @@ fn explicit_picker_model_keeps_its_fingerprint_when_saved_default_changes() {
+     );
+     assert_eq!(first, second);
+ }
++
++fn configured_huggingface_route() -> Config {
++    let mut config = Config::default();
++    config.chat_provider = Some("openai:gpt-4o".to_string());
++    config
++        .cloud_providers
++        .push(crate::config::schema::CloudProviderCreds {
++            id: "p_huggingface".to_string(),
++            slug: "huggingface".to_string(),
++            label: "Hugging Face".to_string(),
++            endpoint: "http://127.0.0.1:1/v1".to_string(),
++            auth_style: crate::config::schema::cloud_providers::AuthStyle::None,
++            ..Default::default()
++        });
++    config
++}
++
++fn assert_huggingface_model_builds(config: &Config, expected_model: &str) {
++    let (_, resolved_model) =
++        crate::inference::provider::factory::create_chat_model_with_model_id("chat", config, 0.0)
++            .expect("case-insensitive cloud selection should resolve through its configured slug");
++    assert_eq!(resolved_model, expected_model);
++}
++
++#[test]
++fn mixed_case_cloud_picker_uses_configured_slug_and_preserves_colon_suffix() {
++    let _guard = crate::inference::inference_test_guard();
++    let config = configured_huggingface_route();
++    let original = serde_json::to_value(&config).expect("config serializes");
++    let selected = "HuggingFace:org/model:version:variant";
++    let effective = effective_session_config(&config, Some(selected), None);
++
++    assert_eq!(
++        effective.chat_provider.as_deref(),
++        Some("huggingface:org/model:version:variant")
++    );
++    assert_eq!(effective.default_model.as_deref(), Some(selected));
++    assert_huggingface_model_builds(&effective, "org/model:version:variant");
++    assert_eq!(
++        serde_json::to_value(&config).expect("config serializes"),
++        original,
++        "picker selection must remain turn-local"
++    );
++}
++
++#[test]
++fn persisted_mixed_case_cloud_default_uses_configured_slug_after_restart() {
++    let _guard = crate::inference::inference_test_guard();
++    let mut config = configured_huggingface_route();
++    let selected = "HUGGINGFACE:org/model:version:variant";
++    config.default_model = Some(selected.to_string());
++    let original = serde_json::to_value(&config).expect("config serializes");
++    let effective = effective_session_config(&config, None, None);
++
++    assert_eq!(
++        effective.chat_provider.as_deref(),
++        Some("huggingface:org/model:version:variant")
++    );
++    assert_eq!(effective.default_model.as_deref(), Some(selected));
++    assert_huggingface_model_builds(&effective, "org/model:version:variant");
++    assert_eq!(
++        serde_json::to_value(&config).expect("config serializes"),
++        original,
++        "restoring a persisted picker default must remain turn-local"
++    );
++}

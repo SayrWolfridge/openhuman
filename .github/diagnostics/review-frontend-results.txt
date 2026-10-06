@@ -2,7 +2,7 @@
 > openhuman-app@0.64.10 test C:\Work\OpenHuman-ops\upstream-pr-candidate\app
 > vitest run --config test/vitest.config.ts "--coverage" "--coverage.include=src/features/conversations/Conversations.tsx" "src/features/conversations/Conversations.processSourceCommand.test.tsx" "src/pages/__tests__/Conversations.render.test.tsx"
 
-17:57:23 [vite] warning: `esbuild` option was specified by "vite-plugin-node-polyfills" plugin. This option is deprecated, please use `oxc` instead.
+00:14:34 [vite] warning: `esbuild` option was specified by "vite-plugin-node-polyfills" plugin. This option is deprecated, please use `oxc` instead.
 Both esbuild and oxc options were set. oxc options will be used and esbuild options will be ignored. The following esbuild options were set: `{
   banner: "import __buffer_polyfill from 'vite-plugin-node-polyfills/shims/buffer'\n" +
     'globalThis.Buffer = globalThis.Buffer || __buffer_polyfill\n' +
@@ -17,21 +17,21 @@ Both esbuild and oxc options were set. oxc options will be used and esbuild opti
 
 
  Test Files  2 passed (2)
-      Tests  89 passed (89)
-   Start at  17:57:25
-   Duration  215.76s (transform 9.49s, setup 2.25s, import 8.51s, tests 199.44s, environment 3.21s)
+      Tests  92 passed (92)
+   Start at  00:14:35
+   Duration  157.09s (transform 9.01s, setup 2.41s, import 6.37s, tests 143.56s, environment 3.11s)
 
  % Coverage report from v8
 -------------------|---------|----------|---------|---------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 File               | % Stmts | % Branch | % Funcs | % Lines | Uncovered Line #s                                                                                                                                                                                                                                                                                
 -------------------|---------|----------|---------|---------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-All files          |   79.91 |    71.67 |   66.22 |   81.93 |                                                                                                                                                                                                                                                                                                  
- Conversations.tsx |   79.91 |    71.67 |   66.22 |   81.93 | 186-211,233,301,473,489,498,617-618,623-624,629-637,642-659,676-677,763-764,797-801,819,822,847-848,879,1015-1018,1043-1045,1048,1065,1071-1089,1124,1153,1158,1278-1281,1387-1388,1410-1411,1550,1595-1596,1643-1651,1779,1803-1818,1836-1849,1873-1884,1906,1913-1918,2008-2022,2062,2070-2085 
+All files          |   80.37 |    71.92 |   67.09 |   82.36 |                                                                                                                                                                                                                                                                                                  
+ Conversations.tsx |   80.37 |    71.92 |   67.09 |   82.36 | 191-216,238,306,478,494,501,652-653,658-659,664-672,677-694,711-712,798-799,832-836,854,857,882-883,914,1050-1053,1078-1080,1083,1100,1106-1124,1159,1188,1193,1312-1315,1420-1421,1443-1444,1583,1628-1629,1676-1684,1812,1836-1851,1869-1882,1906-1917,1939,1946-1951,2041-2055,2095,2103-2118 
 -------------------|---------|----------|---------|---------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 =============================== Coverage summary ===============================
-Statements   : 79.91% ( 545/682 )
-Branches     : 71.67% ( 329/459 )
-Functions    : 66.22% ( 100/151 )
-Lines        : 81.93% ( 508/620 )
+Statements   : 80.37% ( 561/698 )
+Branches     : 71.92% ( 333/463 )
+Functions    : 67.09% ( 104/155 )
+Lines        : 82.36% ( 523/635 )
 ================================================================================

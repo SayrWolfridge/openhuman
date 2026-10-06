@@ -1,4 +1,4 @@
-name: Routing round2 verification
+name: Routing round2 coverage
 on:
   push:
     branches: [codex/routing-ci-comparison]
@@ -7,26 +7,13 @@ permissions:
   contents: read
   actions: read
 jobs:
-  rust-round2:
+  coverage-report:
     runs-on: ubuntu-22.04
-    timeout-minutes: 90
-    container:
-      image: ghcr.io/tinyhumansai/openhuman_ci@sha256:c3c20d625bcc9f75e50c3c2c2b75c88d3e60a3f4352b0f19f5327b490438722d
+    timeout-minutes: 10
     defaults:
       run:
         shell: bash
-    env:
-      CARGO_BUILD_JOBS: '2'
-      CARGO_INCREMENTAL: '0'
-      CARGO_PROFILE_DEV_DEBUG: '0'
-      RUST_MIN_STACK: '67108864'
-      LLVM_PROFILE_FILE_NAME: openhuman-%8m.profraw
-      GH_TOKEN: ${{ github.token }}
     steps:
-      - name: Canonical hosted disk preparation
-        run: |
-          rm -rf /__t/* || true
-          df -h /__w
       - uses: actions/checkout@v7
         with:
           ref: 6ed45f8b0b76a56988d972f157b5385fee32d385
@@ -37,93 +24,31 @@ jobs:
           ref: ${{ github.sha }}
           path: diagnostic-inputs
           persist-credentials: false
-      - name: Prepare canonical dependencies
+      - name: Apply validated source with documentation follow-up
         run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          bash scripts/ci/checkout-submodules.sh
-          pnpm install --frozen-lockfile
-          mkdir -p ci-out/lcov
-          { git rev-parse HEAD; rustc -V; cargo -V; } > ci-out/inputs.txt
-          sha256sum diagnostic-inputs/.github/diagnostics/round2-*.patch > ci-out/patch-hashes.txt
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: . -> target
-          shared-key: ci-fast-rust-cov
-          cache-on-failure: false
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - name: Install canonical test modules
-        run: bash scripts/ci/self-hosted/install-test-modules.sh "/opt/openhuman-test-modules/${GITHUB_RUN_ID}-round2" ci-out/test-modules.env
-      - name: Verify both regressions fail on pre-fix production
-        run: |
-          set -a
-          source ci-out/test-modules.env
-          set +a
-          unset RUSTFLAGS
-          FEATURES="$(bash scripts/ci/product-features.sh)"
-          git apply diagnostic-inputs/.github/diagnostics/round2-regressions.patch
-          for TEST in mixed_case_cloud_picker_uses_configured_slug_and_preserves_colon_suffix persisted_mixed_case_cloud_default_uses_configured_slug_after_restart; do
-            set +e
-            cargo llvm-cov --features "$FEATURES" --no-report -p openhuman --lib -- "$TEST" --test-threads=1 > "ci-out/red-$TEST.log" 2>&1
-            RESULT=$?
-            set -e
-            cat "ci-out/red-$TEST.log"
-            test "$RESULT" = 101
-            grep -q 'test result: FAILED' "ci-out/red-$TEST.log"
-          done
-          git apply -R diagnostic-inputs/.github/diagnostics/round2-regressions.patch
-          git diff --exit-code -- '*.rs'
-      - name: Apply exact repaired Rust delta
-        run: |
-          git apply --check diagnostic-inputs/.github/diagnostics/round2-rust.patch
-          git apply diagnostic-inputs/.github/diagnostics/round2-rust.patch
+          git apply --check diagnostic-inputs/.github/diagnostics/round2-final.patch
+          git apply diagnostic-inputs/.github/diagnostics/round2-final.patch
           git diff --check
-          git diff --binary > ci-out/applied.patch
-          cmp ci-out/applied.patch diagnostic-inputs/.github/diagnostics/round2-rust.patch
-          git diff --name-only -- '*.rs' | xargs rustfmt --edition 2021 --check
-          cargo llvm-cov clean --workspace
-      - name: Run affected sessions and privacy tests
+          mkdir -p coverage-inputs/frontend
+          cp diagnostic-inputs/.github/diagnostics/review-frontend-lcov.info coverage-inputs/frontend/lcov.info
+          cp diagnostic-inputs/.github/diagnostics/review-frontend-results.txt coverage-inputs/frontend/results.txt
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: routing-round2-rust
+          run-id: 37375560509
+          github-token: ${{ github.token }}
+          path: coverage-inputs/rust
+      - name: Install canonical coverage tool
+        run: python3 -m pip install 'diff-cover>=9.2.0'
+      - name: Run canonical changed-line coverage gate
         run: |
-          set -o pipefail
-          set -a
-          source ci-out/test-modules.env
-          set +a
-          unset RUSTFLAGS
-          FEATURES="$(bash scripts/ci/product-features.sh)"
-          for TEST in web_chat::session enforce_local_only_inference_errors_on_external_when_local_only; do
-            cargo llvm-cov --features "$FEATURES" --no-report -p openhuman --lib -- "$TEST" --test-threads=1 2>&1 | tee "ci-out/fixed-${TEST//:/_}.log"
-          done
-      - name: Verify actual warm RPC routing
-        run: |
-          set -o pipefail
-          set -a
-          source ci-out/test-modules.env
-          set +a
-          unset RUSTFLAGS
-          FEATURES="$(bash scripts/ci/product-features.sh)"
-          cargo llvm-cov --features "$FEATURES" --no-report -p openhuman-cli --test json_rpc_e2e -- json_rpc_web_chat_custom_chat_provider_uses_stored_key_and_rebuilds_on_route_change --test-threads=1 2>&1 | tee ci-out/rpc-routing.log
-      - name: Collect fresh Rust coverage
-        if: always()
-        run: |
-          unset RUSTFLAGS
-          cargo llvm-cov report --lcov --output-path ci-out/lcov/lcov-core.info
-      - name: Canonical whole-workspace Rust formatter on Linux
-        continue-on-error: true
-        run: |
-          set -o pipefail
-          { cargo fmt --all --check && cargo fmt --manifest-path crates/openhuman-app/Cargo.toml --all --check; } 2>&1 | tee ci-out/full-rust-format.log
-      - name: Clippy for changed core crate
-        continue-on-error: true
-        run: |
-          set -o pipefail
-          set -a
-          source ci-out/test-modules.env
-          set +a
-          unset RUSTFLAGS
-          FEATURES="$(bash scripts/ci/product-features.sh)"
-          cargo clippy --features "$FEATURES" -p openhuman --lib -- -D warnings 2>&1 | tee ci-out/core-clippy.log
+          find coverage-inputs -type f -name '*.info' -exec sed -i 's|/__w/openhuman/openhuman/||g' {} +
+          bash scripts/ci/self-hosted/diff-cover.sh coverage-inputs 6c8c7ad93f1a66067c22bff382b9ddcf306294cd diff-cover
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
-          name: routing-round2-rust
-          path: ci-out/
+          name: routing-round2-coverage
+          path: |
+            diff-cover/
+            coverage-inputs/frontend/
           retention-days: 14
