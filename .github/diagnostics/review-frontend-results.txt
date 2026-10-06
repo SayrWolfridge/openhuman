@@ -2,7 +2,7 @@
 > openhuman-app@0.64.10 test C:\Work\OpenHuman-ops\upstream-pr-candidate\app
 > vitest run --config test/vitest.config.ts "--coverage" "--coverage.include=src/features/conversations/Conversations.tsx" "src/features/conversations/Conversations.processSourceCommand.test.tsx" "src/pages/__tests__/Conversations.render.test.tsx"
 
-00:14:34 [vite] warning: `esbuild` option was specified by "vite-plugin-node-polyfills" plugin. This option is deprecated, please use `oxc` instead.
+18:39:55 [vite] warning: `esbuild` option was specified by "vite-plugin-node-polyfills" plugin. This option is deprecated, please use `oxc` instead.
 Both esbuild and oxc options were set. oxc options will be used and esbuild options will be ignored. The following esbuild options were set: `{
   banner: "import __buffer_polyfill from 'vite-plugin-node-polyfills/shims/buffer'\n" +
     'globalThis.Buffer = globalThis.Buffer || __buffer_polyfill\n' +
@@ -18,15 +18,15 @@ Both esbuild and oxc options were set. oxc options will be used and esbuild opti
 
  Test Files  2 passed (2)
       Tests  92 passed (92)
-   Start at  00:14:35
-   Duration  157.09s (transform 9.01s, setup 2.41s, import 6.37s, tests 143.56s, environment 3.11s)
+   Start at  18:39:56
+   Duration  116.40s (transform 6.12s, setup 1.43s, import 9.80s, tests 101.81s, environment 1.94s)
 
  % Coverage report from v8
 -------------------|---------|----------|---------|---------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 File               | % Stmts | % Branch | % Funcs | % Lines | Uncovered Line #s                                                                                                                                                                                                                                                                                
 -------------------|---------|----------|---------|---------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 All files          |   80.37 |    71.92 |   67.09 |   82.36 |                                                                                                                                                                                                                                                                                                  
- Conversations.tsx |   80.37 |    71.92 |   67.09 |   82.36 | 191-216,238,306,478,494,501,652-653,658-659,664-672,677-694,711-712,798-799,832-836,854,857,882-883,914,1050-1053,1078-1080,1083,1100,1106-1124,1159,1188,1193,1312-1315,1420-1421,1443-1444,1583,1628-1629,1676-1684,1812,1836-1851,1869-1882,1906-1917,1939,1946-1951,2041-2055,2095,2103-2118 
+ Conversations.tsx |   80.37 |    71.92 |   67.09 |   82.36 | 191-216,238,306,478,494,501,651-652,657-658,663-671,676-693,710-711,797-798,831-835,853,856,881-882,913,1049-1052,1077-1079,1082,1099,1105-1123,1158,1187,1192,1311-1314,1419-1420,1442-1443,1582,1627-1628,1675-1683,1811,1835-1850,1868-1881,1905-1916,1938,1945-1950,2040-2054,2094,2102-2117 
 -------------------|---------|----------|---------|---------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 =============================== Coverage summary ===============================

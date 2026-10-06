@@ -1,4 +1,4 @@
-name: Routing round2 coverage
+name: Routing lint coverage
 on:
   push:
     branches: [codex/routing-ci-comparison]
@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: 6ed45f8b0b76a56988d972f157b5385fee32d385
+          ref: 89ed4c91de5dc70bb37f84e537931208e20ccafd
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/checkout@v7
@@ -26,8 +26,8 @@ jobs:
           persist-credentials: false
       - name: Apply validated source with documentation follow-up
         run: |
-          git apply --check diagnostic-inputs/.github/diagnostics/round2-final.patch
-          git apply diagnostic-inputs/.github/diagnostics/round2-final.patch
+          git apply --check diagnostic-inputs/.github/diagnostics/round3-final.patch
+          git apply diagnostic-inputs/.github/diagnostics/round3-final.patch
           git diff --check
           mkdir -p coverage-inputs/frontend
           cp diagnostic-inputs/.github/diagnostics/review-frontend-lcov.info coverage-inputs/frontend/lcov.info
@@ -47,7 +47,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
-          name: routing-round2-coverage
+          name: routing-round3-coverage
           path: |
             diff-cover/
             coverage-inputs/frontend/
