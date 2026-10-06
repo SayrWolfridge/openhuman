@@ -50,6 +50,13 @@ fn resolve_sandbox_policy_sandboxed_remote_uses_docker() {
     assert_eq!(policy.backend, SandboxBackendKind::Docker);
     assert!(!policy.allow_network);
     assert!(policy.docker_overrides.is_some());
+    assert_eq!(
+        policy.env_passthrough,
+        ["PATH", "HOME", "TERM", "LANG", "LC_ALL", "LC_CTYPE", "USER", "SHELL", "TMPDIR"]
+            .map(str::to_owned)
+            .to_vec(),
+        "Docker keeps its established general environment allowlist"
+    );
 }
 
 #[test]
@@ -512,6 +519,26 @@ async fn landlock_jail_runs_cargo_and_mktemp_but_blocks_writes_outside() {
         let r = run_local(&policy, "cargo --version").await;
         assert!(r.success(), "cargo failed under the jail: {}", r.stderr);
         assert!(r.stdout.starts_with("cargo "), "stdout: {}", r.stdout);
+
+        // The fixture uses the host's real toolchain, so compare the sandbox
+        // values with the environment that selected that toolchain. This avoids
+        // process-global env mutation and exercises the actual spawn path.
+        let expected_homes = ["RUSTUP_HOME", "CARGO_HOME"].map(|name| {
+            std::env::var_os(name)
+                .map(|value| value.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        });
+        let r = run_local(
+            &policy,
+            "printf '%s\\n' \"${RUSTUP_HOME-}\" \"${CARGO_HOME-}\"",
+        )
+        .await;
+        assert!(r.success(), "toolchain home probe failed: {}", r.stderr);
+        assert_eq!(
+            r.stdout,
+            format!("{}\n{}\n", expected_homes[0], expected_homes[1]),
+            "sandboxed commands must inherit explicitly configured Rust toolchain homes"
+        );
     } else {
         eprintln!("SKIP cargo: not installed on this host");
     }

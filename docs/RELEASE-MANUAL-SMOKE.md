@@ -129,3 +129,5 @@ Notes:
 ```
 
 Paste the filled block as a commit comment on the `v<version>-staging` tagged commit before promoting to production.
+
+- [ ] **Native sandbox preserves installed Rust toolchain homes** — In an isolated Linux profile with Rust installed through explicit `RUSTUP_HOME` and `CARGO_HOME`, run `cargo --version` through the sandboxed shell. Expected: the installed Cargo version is returned, temporary files use the sandbox scratch directory, workspace writes succeed, and a write to a separately prepared outside directory is denied. Verify the configured homes match the values observed inside the native sandbox.

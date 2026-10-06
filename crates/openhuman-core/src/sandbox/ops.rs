@@ -21,6 +21,10 @@ pub const SANDBOX_ENV_PASSTHROUGH: &[&str] = &[
     "PATH", "HOME", "TERM", "LANG", "LC_ALL", "LC_CTYPE", "USER", "SHELL", "TMPDIR",
 ];
 
+/// Native toolchain homes are available to host-local commands only. Docker
+/// keeps its own image-provided Rust toolchain environment.
+const HOST_TOOLCHAIN_ENV_PASSTHROUGH: &[&str] = &["RUSTUP_HOME", "CARGO_HOME"];
+
 /// Host switch that turns the agent sandbox off for the whole process.
 ///
 /// For hosts that already isolate the core (a container, a CI or benchmark
@@ -257,7 +261,11 @@ async fn execute_unsandboxed(
     let mut cmd = platform_shell::build_tokio_command(command);
     cmd.current_dir(working_dir);
     cmd.env_clear();
-    for var in SANDBOX_ENV_PASSTHROUGH {
+    for var in SANDBOX_ENV_PASSTHROUGH
+        .iter()
+        .chain(HOST_TOOLCHAIN_ENV_PASSTHROUGH.iter())
+        .copied()
+    {
         if let Ok(val) = std::env::var(var) {
             cmd.env(var, val);
         }
@@ -385,7 +393,11 @@ async fn execute_local_jail(
     let mut cmd = platform_shell::build_std_command(&wrapped);
     cmd.current_dir(working_dir);
     cmd.env_clear();
-    for var in SANDBOX_ENV_PASSTHROUGH {
+    for var in SANDBOX_ENV_PASSTHROUGH
+        .iter()
+        .chain(HOST_TOOLCHAIN_ENV_PASSTHROUGH.iter())
+        .copied()
+    {
         if let Ok(val) = std::env::var(var) {
             cmd.env(var, val);
         }
