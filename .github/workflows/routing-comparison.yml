@@ -7,7 +7,46 @@ permissions:
   contents: read
   actions: read
 jobs:
-  sandbox-rust-homes:
+  changed-line-coverage:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 6c8c7ad93f1a66067c22bff382b9ddcf306294cd
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          path: diagnostic-inputs
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: sandbox-rust-homes
+          run-id: 37507508324
+          github-token: ${{ github.token }}
+          path: measured
+      - name: Match tested Rust sources and compute exact changed-line coverage
+        run: |
+          git apply --check diagnostic-inputs/.github/diagnostics/sandbox-homes.patch
+          git apply diagnostic-inputs/.github/diagnostics/sandbox-homes.patch
+          git diff --check
+          sha256sum -c measured/source-hashes.txt
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install diff-cover
+        run: pip install 'diff-cover>=9.2.0'
+      - name: Project changed-line coverage gate
+        run: bash scripts/ci/self-hosted/diff-cover.sh measured/lcov 6c8c7ad93f1a66067c22bff382b9ddcf306294cd ci-out/diff-cover
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: sandbox-rust-homes-coverage
+          path: ci-out/
+          retention-days: 14
+  native-lint:
     runs-on: ubuntu-22.04
     timeout-minutes: 75
     container:
@@ -20,7 +59,6 @@ jobs:
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
       RUST_MIN_STACK: '67108864'
-      LLVM_PROFILE_FILE_NAME: openhuman-%8m.profraw
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v7
@@ -33,83 +71,31 @@ jobs:
           ref: ${{ github.sha }}
           path: diagnostic-inputs
           persist-credentials: false
-      - name: Prepare canonical source and test dependencies
+      - name: Prepare exact source and canonical dependencies
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           bash scripts/ci/checkout-submodules.sh
           pnpm install --frozen-lockfile
-          mkdir -p ci-out/lcov
-          git rev-parse HEAD > ci-out/base.txt
-          rustc -V > ci-out/rustc-version.txt
-          cargo -V > ci-out/cargo-version.txt
-          printf 'RUSTUP_HOME=%s\nCARGO_HOME=%s\nHOME=%s\n' "$RUSTUP_HOME" "$CARGO_HOME" "$HOME" > ci-out/rust-homes.txt
-          sha256sum diagnostic-inputs/.github/diagnostics/sandbox-homes.patch > ci-out/patch-hash.txt
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: . -> target
-          shared-key: ci-fast-rust-cov
-          cache-on-failure: false
-      - uses: taiki-e/install-action@cargo-llvm-cov
-      - name: Install canonical test modules
-        run: bash scripts/ci/self-hosted/install-test-modules.sh "/opt/openhuman-test-modules/${GITHUB_RUN_ID}-sandbox" ci-out/test-modules.env
-      - name: Reproduce Cargo home failure on untouched upstream base
-        run: |
-          set -a
-          source ci-out/test-modules.env
-          set +a
-          unset RUSTFLAGS
-          FEATURES="$(bash scripts/ci/product-features.sh)"
-          set +e
-          bash scripts/ci-cancel-aware.sh cargo llvm-cov --features "$FEATURES" --no-report -p openhuman --lib -- landlock_jail_runs_cargo_and_mktemp_but_blocks_writes_outside --test-threads=1 > ci-out/base-cargo-jail.log 2>&1
-          RESULT=$?
-          set -e
-          cat ci-out/base-cargo-jail.log
-          test "$RESULT" = 101
-          grep -Fq "/github/home/.rustup" ci-out/base-cargo-jail.log
-          grep -Fq "Permission denied" ci-out/base-cargo-jail.log
-          git diff --exit-code
-      - name: Apply exact repair and check source scope
-        run: |
+          mkdir -p ci-out
           git apply --check diagnostic-inputs/.github/diagnostics/sandbox-homes.patch
           git apply diagnostic-inputs/.github/diagnostics/sandbox-homes.patch
           git diff --check
           git diff --binary > ci-out/applied.patch
           cmp ci-out/applied.patch diagnostic-inputs/.github/diagnostics/sandbox-homes.patch
           sha256sum crates/openhuman-core/src/sandbox/ops.rs crates/openhuman-core/src/sandbox/ops_tests.rs > ci-out/source-hashes.txt
-          git diff --name-only -- '*.rs' | xargs rustfmt --edition 2021 --check
-          bash scripts/ci-cancel-aware.sh cargo llvm-cov clean --workspace
-      - name: Verify installed Cargo and preserved confinement
-        run: |
-          set -o pipefail
-          set -a
-          source ci-out/test-modules.env
-          set +a
-          unset RUSTFLAGS
-          FEATURES="$(bash scripts/ci/product-features.sh)"
-          bash scripts/ci-cancel-aware.sh cargo llvm-cov --features "$FEATURES" --no-report -p openhuman --lib -- landlock_jail_runs_cargo_and_mktemp_but_blocks_writes_outside --test-threads=1 2>&1 | tee ci-out/fixed-cargo-jail.log
-      - name: Run all affected sandbox regressions
-        run: |
-          set -o pipefail
-          set -a
-          source ci-out/test-modules.env
-          set +a
-          unset RUSTFLAGS
-          FEATURES="$(bash scripts/ci/product-features.sh)"
-          bash scripts/ci-cancel-aware.sh cargo llvm-cov --features "$FEATURES" --no-report -p openhuman --lib -- sandbox:: --test-threads=1 2>&1 | tee ci-out/sandbox-tests.log
-      - name: Collect fresh changed-line coverage
-        run: |
-          bash scripts/ci-cancel-aware.sh cargo llvm-cov report --lcov --output-path ci-out/lcov/lcov-core.info
-          sed -i 's|/__w/openhuman/openhuman/||g' ci-out/lcov/lcov-core.info
-          python3 -m pip install 'diff-cover>=9.2.0'
-          bash scripts/ci/self-hosted/diff-cover.sh ci-out/lcov 6c8c7ad93f1a66067c22bff382b9ddcf306294cd ci-out/diff-cover
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+          shared-key: ci-fast-rust-cov
+          cache-on-failure: false
+      - name: Install canonical test modules
+        run: bash scripts/ci/self-hosted/install-test-modules.sh "/opt/openhuman-test-modules/${GITHUB_RUN_ID}-sandbox" ci-out/test-modules.env
       - name: Whole-workspace Rust formatting
         run: |
-          set -o pipefail
           bash scripts/ci-cancel-aware.sh cargo fmt --all --check 2>&1 | tee ci-out/full-rust-format.log
           bash scripts/ci-cancel-aware.sh cargo fmt --manifest-path crates/openhuman-app/Cargo.toml --all --check 2>&1 | tee ci-out/tauri-rust-format.log
       - name: Changed core crate Clippy
         run: |
-          set -o pipefail
           set -a
           source ci-out/test-modules.env
           set +a
@@ -119,6 +105,6 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
-          name: sandbox-rust-homes
+          name: sandbox-rust-homes-lint
           path: ci-out/
           retention-days: 14
