@@ -1,5 +1,5 @@
 diff --git a/app/scripts/e2e-run-all-flows.sh b/app/scripts/e2e-run-all-flows.sh
-index 84b4a80295..6496d72a0b 100755
+index 84b4a80295fab71a83a4ec14d6604202cf0d8922..6496d72a0b49b844f0f44148b13fa344456dc2ab 100755
 --- a/app/scripts/e2e-run-all-flows.sh
 +++ b/app/scripts/e2e-run-all-flows.sh
 @@ -408,6 +408,7 @@ if should_run_suite "settings"; then
@@ -11,7 +11,7 @@ index 84b4a80295..6496d72a0b 100755
  fi
  
 diff --git a/app/src/features/conversations/Conversations.processSourceCommand.test.tsx b/app/src/features/conversations/Conversations.processSourceCommand.test.tsx
-index 0e9383c35a..1b75c88cac 100644
+index 0e9383c35ae48573914cae02097f1677dc5fe76e..1b75c88cacdaef83682f351934d5ce374e3098dc 100644
 --- a/app/src/features/conversations/Conversations.processSourceCommand.test.tsx
 +++ b/app/src/features/conversations/Conversations.processSourceCommand.test.tsx
 @@ -18,6 +18,7 @@ import { SidebarSlotOutlet, SidebarSlotProvider } from '../../components/layout/
@@ -580,7 +580,7 @@ index 0e9383c35a..1b75c88cac 100644
 +  });
 +});
 diff --git a/app/src/features/conversations/Conversations.tsx b/app/src/features/conversations/Conversations.tsx
-index 50429e28cf..064aea4a7f 100644
+index 50429e28cf077878e83c77a11ef1cbcfb8b0b13a..064aea4a7f2efad41bc2d7950c358b7160f54e18 100644
 --- a/app/src/features/conversations/Conversations.tsx
 +++ b/app/src/features/conversations/Conversations.tsx
 @@ -155,6 +155,11 @@ interface ConversationsProps {
@@ -796,7 +796,7 @@ index 50429e28cf..064aea4a7f 100644
    };
  
 diff --git a/app/src/pages/__tests__/Conversations.render.test.tsx b/app/src/pages/__tests__/Conversations.render.test.tsx
-index 9c45d996ce..bb998cd191 100644
+index 9c45d996cee2e6192cf8ebcaf0ceb74f2be897b2..bb998cd191921bbb9c280c07539741176fdf288c 100644
 --- a/app/src/pages/__tests__/Conversations.render.test.tsx
 +++ b/app/src/pages/__tests__/Conversations.render.test.tsx
 @@ -862,13 +862,15 @@ describe('Conversations — smoke render (#1123 welcome-lock removal)', () => {
@@ -915,7 +915,7 @@ index 9c45d996ce..bb998cd191 100644
    });
  
 diff --git a/crates/openhuman-core/src/inference/provider/factory/managed_backend.rs b/crates/openhuman-core/src/inference/provider/factory/managed_backend.rs
-index dd0a4c4050..352aea1879 100644
+index dd0a4c405019a77495c194202dc78be6bd237535..352aea1879c84ef877b305a89ac763431a50c444 100644
 --- a/crates/openhuman-core/src/inference/provider/factory/managed_backend.rs
 +++ b/crates/openhuman-core/src/inference/provider/factory/managed_backend.rs
 @@ -46,6 +46,10 @@ pub(super) fn resolve_managed_backend_with_model_override(
@@ -930,7 +930,7 @@ index dd0a4c4050..352aea1879 100644
      // `MODEL_MANAGED_DEFAULT`. Roles still matter — they picked the *route*
      // that led here — but there are no per-role tier endpoints any more.
 diff --git a/crates/openhuman-core/src/inference/provider/factory_crate_native_tests.rs b/crates/openhuman-core/src/inference/provider/factory_crate_native_tests.rs
-index f904ab8be0..6ac7324903 100644
+index f904ab8be053a2341e1b08b854d2bd88de77e1bf..6ac7324903eee65e03c0dc9b684c1a58abb041cc 100644
 --- a/crates/openhuman-core/src/inference/provider/factory_crate_native_tests.rs
 +++ b/crates/openhuman-core/src/inference/provider/factory_crate_native_tests.rs
 @@ -58,6 +58,28 @@ fn enforce_local_only_inference_errors_on_external_when_local_only() {
@@ -963,7 +963,7 @@ index f904ab8be0..6ac7324903 100644
      enforce_local_only_inference("chat", "ollama:llama3")
          .expect("local provider must be permitted in LocalOnly mode");
 diff --git a/crates/openhuman-core/src/inference/provider/openhuman_backend_model_tests.rs b/crates/openhuman-core/src/inference/provider/openhuman_backend_model_tests.rs
-index b973df6c5b..f4bf0147b5 100644
+index b973df6c5b7fc7c3f9862df24608a740ad541c51..f4bf0147b5a518efcda7cea8f88bfafdb20df9fa 100644
 --- a/crates/openhuman-core/src/inference/provider/openhuman_backend_model_tests.rs
 +++ b/crates/openhuman-core/src/inference/provider/openhuman_backend_model_tests.rs
 @@ -429,16 +429,8 @@ async fn consecutive_managed_calls_reuse_one_connection() {
@@ -1022,7 +1022,7 @@ index b973df6c5b..f4bf0147b5 100644
      seed_app_session(tmp.path());
      let backend = backend_pointed_at("127.0.0.1:9", tmp.path());
 diff --git a/crates/openhuman-core/src/web_chat/README.md b/crates/openhuman-core/src/web_chat/README.md
-index 4d7deddc03..4afb92f05d 100644
+index 4d7deddc0380e90ae2338d8cf23a2bf7105dc0b4..4afb92f05d640b42a2f9d1056918510ea990c1b5 100644
 --- a/crates/openhuman-core/src/web_chat/README.md
 +++ b/crates/openhuman-core/src/web_chat/README.md
 @@ -27,7 +27,8 @@ runner behind both surfaces.
@@ -1065,7 +1065,7 @@ index 4d7deddc03..4afb92f05d 100644
 +  `progress_bridge_tests.rs`, `reply_persistence_tests.rs`, `run_task_tests.rs`,
 +  `session_checkout_tests.rs`, `session_routing_tests.rs`.
 diff --git a/crates/openhuman-core/src/web_chat/session.rs b/crates/openhuman-core/src/web_chat/session.rs
-index 57e637fcf1..2020057f32 100644
+index 57e637fcf1ec9b88f7edecbaa3e8f702e58521d5..2020057f32799d78143d2054ba0430977e501a18 100644
 --- a/crates/openhuman-core/src/web_chat/session.rs
 +++ b/crates/openhuman-core/src/web_chat/session.rs
 @@ -71,6 +71,66 @@ pub(crate) fn provider_role_for_model_override(model_override: Option<&str>) ->
@@ -1200,7 +1200,7 @@ index 57e637fcf1..2020057f32 100644
 +#[path = "session_routing_tests.rs"]
 +mod session_routing_tests;
 diff --git a/crates/openhuman-core/src/web_chat/session_checkout_tests.rs b/crates/openhuman-core/src/web_chat/session_checkout_tests.rs
-index 782219d9c2..e94618d434 100644
+index 782219d9c22d7cf0f34530fe2c719098f7d42d82..e94618d43486f6150d35ab669f18b00f5acdbbbf 100644
 --- a/crates/openhuman-core/src/web_chat/session_checkout_tests.rs
 +++ b/crates/openhuman-core/src/web_chat/session_checkout_tests.rs
 @@ -373,6 +373,7 @@ async fn a_thread_binds_one_stable_session_across_cold_boots() {
@@ -1213,7 +1213,7 @@ index 782219d9c2..e94618d434 100644
          provider_binding: "openhuman".to_string(),
 diff --git a/crates/openhuman-core/src/web_chat/session_routing_tests.rs b/crates/openhuman-core/src/web_chat/session_routing_tests.rs
 new file mode 100644
-index 0000000000..ea888c1d99
+index 0000000000000000000000000000000000000000..ea888c1d9955b88bbc3f1def877a1735ab2008ac
 --- /dev/null
 +++ b/crates/openhuman-core/src/web_chat/session_routing_tests.rs
 @@ -0,0 +1,442 @@
@@ -1660,7 +1660,7 @@ index 0000000000..ea888c1d99
 +    );
 +}
 diff --git a/crates/openhuman-core/src/web_chat/types.rs b/crates/openhuman-core/src/web_chat/types.rs
-index 14d5fe0515..92fc05bbb8 100644
+index 14d5fe051588346b71ab0dfd8ae929afbb92cd6a..92fc05bbb894ddd880d11a8d48777b747b9c85bb 100644
 --- a/crates/openhuman-core/src/web_chat/types.rs
 +++ b/crates/openhuman-core/src/web_chat/types.rs
 @@ -59,6 +59,9 @@ impl std::fmt::Display for QueueMode {
@@ -1674,7 +1674,7 @@ index 14d5fe0515..92fc05bbb8 100644
      pub(super) target_agent_id: String,
      pub(super) provider_binding: String,
 diff --git a/crates/openhuman-core/src/web_chat/web_tests.rs b/crates/openhuman-core/src/web_chat/web_tests.rs
-index 0e23843dcb..1619823249 100644
+index 0e23843dcbe332ad8289c6bbf37caff946f22c4f..161982324946daf52d0bd804416e4ccaa282b03f 100644
 --- a/crates/openhuman-core/src/web_chat/web_tests.rs
 +++ b/crates/openhuman-core/src/web_chat/web_tests.rs
 @@ -61,6 +61,7 @@ fn fp(
@@ -1686,7 +1686,7 @@ index 0e23843dcb..1619823249 100644
          target_agent_id: target.to_string(),
          provider_binding: provider_binding.to_string(),
 diff --git a/docs/RELEASE-MANUAL-SMOKE.md b/docs/RELEASE-MANUAL-SMOKE.md
-index 023788306f..04ab151583 100644
+index 023788306fe091726b2d4736262e7e47e3d43b5d..04ab15158379ed808ee5b1390fed768ab79a9d4b 100644
 --- a/docs/RELEASE-MANUAL-SMOKE.md
 +++ b/docs/RELEASE-MANUAL-SMOKE.md
 @@ -91,6 +91,8 @@ Applies to every release, all platforms.
@@ -1699,7 +1699,7 @@ index 023788306f..04ab151583 100644
  - [ ] **Caller-owned inference works without an OpenHuman session** — In a local workspace without an OpenHuman login, configure Ollama/LM Studio/MLX/oMLX/local-openai or an independently authenticated Claude Code/Agent SDK provider. Run chat and an agent flow routed entirely to that provider. For a named harness agent, also configure the summarization route to managed inference and verify that the agent still uses its local route; reversing those routes must retain the managed agent's session requirement. Expected: no OpenHuman session requirement. Select managed inference instead: it must still require a backend session. With LocalOnly privacy enabled, local runtimes remain allowed and Claude subprocesses remain blocked as external inference.
  - [ ] **LocalOnly blocks remote search** — Configure a remote search provider and enable LocalOnly privacy. Invoke `web_search_tool` with a harmless query. Expected: the tool returns a policy-blocked result and does not dispatch to the provider. Switch privacy to Standard and confirm the same tool can complete.
 diff --git a/docs/TEST-COVERAGE-MATRIX.md b/docs/TEST-COVERAGE-MATRIX.md
-index bde4641cdb..d907e905c6 100644
+index bde4641cdb2ada3dec5d418a465fb2def0654691..d907e905c6339234767a2c89c99cf31a64fc74ef 100644
 --- a/docs/TEST-COVERAGE-MATRIX.md
 +++ b/docs/TEST-COVERAGE-MATRIX.md
 @@ -582,7 +582,7 @@ The thread JSONL store moved to `tinyagents_session::threads` (`vendor/tinyagent
@@ -1712,7 +1712,7 @@ index bde4641cdb..d907e905c6 100644
  
  ### 13.4 Developer Options
 diff --git a/tests/json_rpc_e2e.rs b/tests/json_rpc_e2e.rs
-index ac303d501c..bb19c746f0 100644
+index ac303d501c5fe7e47c7213e5ea191f36332e5157..bb19c746f0af4a08e4535fa8f53ad7f6e0a8353a 100644
 --- a/tests/json_rpc_e2e.rs
 +++ b/tests/json_rpc_e2e.rs
 @@ -3936,8 +3936,77 @@ async fn json_rpc_web_chat_routing_cases_use_expected_backend_models_inner() {

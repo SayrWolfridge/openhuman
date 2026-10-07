@@ -53,8 +53,13 @@ jobs:
           sha256sum "diagnostic-inputs/.github/diagnostics/pr6978-followup.patch" "diagnostic-inputs/.github/diagnostics/pr6978-source-hashes.txt" "diagnostic-inputs/.github/diagnostics/pr6978-rust-source-files.txt" > ci-out/diagnostic-input-hashes.txt
           git apply --check "diagnostic-inputs/.github/diagnostics/pr6978-followup.patch"
           git apply "diagnostic-inputs/.github/diagnostics/pr6978-followup.patch"
+          while read -r digest source_path; do
+            if ! git ls-files --error-unmatch "$source_path" >/dev/null 2>&1; then
+              git add --intent-to-add -- "$source_path"
+            fi
+          done < "diagnostic-inputs/.github/diagnostics/pr6978-source-hashes.txt"
           git diff --check
-          git diff --binary > ci-out/applied.patch
+          git diff --full-index --binary > ci-out/applied.patch
           cmp ci-out/applied.patch "diagnostic-inputs/.github/diagnostics/pr6978-followup.patch"
           cp "diagnostic-inputs/.github/diagnostics/pr6978-source-hashes.txt" ci-out/source-hashes.txt
           sha256sum -c "diagnostic-inputs/.github/diagnostics/pr6978-source-hashes.txt"
@@ -152,8 +157,13 @@ jobs:
           test "$(git rev-parse HEAD)" = '7578346c85973c61afbfe6e24d88eb0a174ba014'
           git apply --check diagnostic-inputs/.github/diagnostics/pr6978-followup.patch
           git apply diagnostic-inputs/.github/diagnostics/pr6978-followup.patch
+          while read -r digest source_path; do
+            if ! git ls-files --error-unmatch "$source_path" >/dev/null 2>&1; then
+              git add --intent-to-add -- "$source_path"
+            fi
+          done < diagnostic-inputs/.github/diagnostics/pr6978-source-hashes.txt
           git diff --check
-          git diff --binary > measured-reapplied.patch
+          git diff --full-index --binary > measured-reapplied.patch
           cmp measured-reapplied.patch diagnostic-inputs/.github/diagnostics/pr6978-followup.patch
           sha256sum -c diagnostic-inputs/.github/diagnostics/pr6978-source-hashes.txt
           cmp measured/source-hashes.txt diagnostic-inputs/.github/diagnostics/pr6978-source-hashes.txt
