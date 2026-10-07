@@ -195,6 +195,27 @@ impl<'a> Builder<'a> {
         normalized
     }
 
+    fn rustup_roots(&self) -> Vec<PathBuf> {
+        let mut roots = Vec::new();
+        if let Some(home) = self.home {
+            roots.push(home.join(".rustup"));
+        }
+        if let Ok(raw) = std::env::var("RUSTUP_HOME") {
+            let configured = PathBuf::from(raw);
+            if configured.is_absolute() {
+                roots.push(configured);
+            }
+        }
+        let mut normalized = Vec::new();
+        for root in roots {
+            let root = root.canonicalize().unwrap_or(root);
+            if !normalized.contains(&root) {
+                normalized.push(root);
+            }
+        }
+        normalized
+    }
+
     /// Cargo's piecewise grants may include children of Cargo roots, but may
     /// not collapse through a symlink onto a root or credentials. A custom
     /// Rustup root is broader and therefore may overlap neither.
@@ -281,10 +302,25 @@ impl<'a> Builder<'a> {
 
     fn cargo_read_write(&mut self, path: &Path, source: &str) {
         if let Some(path) = self.admit(path, source) {
-            if !Self::cargo_grant_overlaps(&path, &self.cargo_roots(), false, true) {
-                self.record_read_write(path);
+            if Self::cargo_grant_overlaps(&path, &self.cargo_roots(), false, true) {
+                return;
             }
+            if self.overlaps_rustup_home(&path) {
+                tracing::warn!(
+                    source,
+                    path = %path.display(),
+                    "[sandbox:grants] refused: writable Cargo cache overlaps a Rustup home"
+                );
+                return;
+            }
+            self.record_read_write(path);
         }
+    }
+
+    fn overlaps_rustup_home(&self, candidate: &Path) -> bool {
+        self.rustup_roots().iter().any(|root| {
+            candidate == root || candidate.starts_with(root) || root.starts_with(candidate)
+        })
     }
 
     fn record_read_only(&mut self, path: PathBuf) {

@@ -212,6 +212,65 @@ fn cargo_symlink_aliases_cannot_reach_root_or_credentials() {
     assert!(!has(&grants.read_write, &bin));
 }
 
+#[cfg(unix)]
+#[test]
+fn cargo_cache_aliases_cannot_upgrade_configured_rustup_home() {
+    let home = fake_home();
+    let install = tempfile::tempdir().unwrap();
+    let rustup = install.path().join("rustup-home");
+    let cache = install.path().join("dedicated-cache");
+    fs::create_dir_all(rustup.join("toolchains")).unwrap();
+    fs::create_dir_all(&cache).unwrap();
+
+    for (name, target) in [
+        ("equal", rustup.clone()),
+        ("descendant", rustup.join("toolchains")),
+        ("ancestor", install.path().to_path_buf()),
+    ] {
+        let cargo = install.path().join(format!("cargo-{name}"));
+        fs::create_dir_all(cargo.join("bin")).unwrap();
+        std::os::unix::fs::symlink(target, cargo.join("registry")).unwrap();
+        std::os::unix::fs::symlink(&cache, cargo.join("git")).unwrap();
+
+        let _env = EnvVarGuard::locked()
+            .with("RUSTUP_HOME", &rustup)
+            .with("CARGO_HOME", &cargo);
+        let grants = resolve_local_jail_grants(Some(home.path()), &LocalJailConfig::default());
+        let rustup = canon(&rustup);
+        let cache = canon(&cache);
+        assert!(has(&grants.read_only, &rustup), "{name}: Rustup RO missing");
+        assert!(
+            grants
+                .read_write
+                .iter()
+                .all(|path| !path.starts_with(&rustup) && !rustup.starts_with(path)),
+            "{name}: Cargo cache RW overlaps Rustup: {:?}",
+            grants.read_write
+        );
+        assert!(
+            has(&grants.read_write, &cache),
+            "{name}: external cache RW missing"
+        );
+        drop(_env);
+    }
+
+    let default_rustup = canon(&home.path().join(".rustup"));
+    let cargo = install.path().join("cargo-default-rustup");
+    fs::create_dir_all(cargo.join("bin")).unwrap();
+    std::os::unix::fs::symlink(&default_rustup, cargo.join("registry")).unwrap();
+    std::os::unix::fs::symlink(&cache, cargo.join("git")).unwrap();
+    let _env = EnvVarGuard::locked()
+        .without("RUSTUP_HOME")
+        .with("CARGO_HOME", &cargo);
+    let grants = resolve_local_jail_grants(Some(home.path()), &LocalJailConfig::default());
+    assert!(has(&grants.read_only, &default_rustup));
+    assert!(grants
+        .read_write
+        .iter()
+        .all(|path| { !path.starts_with(&default_rustup) && !default_rustup.starts_with(path) }));
+    assert!(has(&grants.read_write, &canon(&cache)));
+}
+
 #[test]
 fn custom_rust_homes_inside_credential_stores_are_refused() {
     let home = fake_home();
