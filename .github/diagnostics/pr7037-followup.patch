@@ -570,7 +570,7 @@ index bde4641cdb2ada3dec5d418a465fb2def0654691..bb2b791bd76d2e284a379f17792925bb
  | 6.2.3 | Git Read Operations          | RU+WD | `vendor/tinyagents/vendor/tinytools/crates/tinytools-std/src/filesystem/git_operations/test.rs`, `app/test/e2e/specs/tool-shell-git-flow.spec.ts` | ✅     | Was 🟡 — WDIO seeds a fixture repo in OPENHUMAN_WORKSPACE and asserts read ops succeed           |
  | 6.2.4 | Git Write Operations         | RU+WD | `vendor/tinyagents/vendor/tinytools/crates/tinytools-std/src/filesystem/git_operations/test.rs`, `app/test/e2e/specs/tool-shell-git-flow.spec.ts` | ✅     | Was 🟡 — WDIO commits into the same fixture and asserts log advances                             |
 diff --git a/tests/agent_harness_e2e.rs b/tests/agent_harness_e2e.rs
-index a1b73c7aed990f3993ab71d36cf8dec617ec440b..1594d05a77d98942573394066b79c7ef3fa2cbe5 100644
+index a1b73c7aed990f3993ab71d36cf8dec617ec440b..da4bc36955ae5f060949517679dca25aef25a3b7 100644
 --- a/tests/agent_harness_e2e.rs
 +++ b/tests/agent_harness_e2e.rs
 @@ -36,7 +36,9 @@ use serde_json::{json, Value};
@@ -583,7 +583,7 @@ index a1b73c7aed990f3993ab71d36cf8dec617ec440b..1594d05a77d98942573394066b79c7ef
  use openhuman_rpc::server::build_core_http_router;
  
  const TEST_RPC_TOKEN: &str = "json-rpc-e2e-local-token";
-@@ -5159,3 +5161,363 @@ async fn a_wrong_tool_guess_is_retried_not_treated_as_an_auth_blocker_inner() {
+@@ -5159,3 +5161,361 @@ async fn a_wrong_tool_guess_is_retried_not_treated_as_an_auth_blocker_inner() {
  
      stack.shutdown();
  }
@@ -768,8 +768,6 @@ index a1b73c7aed990f3993ab71d36cf8dec617ec440b..1594d05a77d98942573394066b79c7ef
 +    let command = format!(
 +        "set -eu; export PATH={cargo_bin}:$PATH; printf 'RUSTUP_HOME=%s\\nCARGO_HOME=%s\\n' \"$RUSTUP_HOME\" \"$CARGO_HOME\"; printf 'CARGO_EXE=%s\\n' \"$(command -v cargo)\"; active_toolchain=$(rustup show active-toolchain); test -n \"$active_toolchain\"; test \"$active_toolchain\" = {expected_toolchain}; printf 'RUSTUP_ACTIVE_TOOLCHAIN=%s\\n' \"$active_toolchain\"; cargo_version=$(cargo --version); test -n \"$cargo_version\"; test \"$cargo_version\" = {expected_cargo_version}; printf 'CARGO_VERSION=%s\\n' \"$cargo_version\"; printf 'cache-write\\n' > \"$CARGO_HOME/registry/agent-shell-write.txt\"; printf 'cache-write\\n' > \"$CARGO_HOME/git/agent-shell-write.txt\"; printf 'CARGO_CACHE_WRITE=ok\\n'; printf 'workspace-write-ok\\n' > '{marker_name}'; test \"$(cat '{marker_name}')\" = workspace-write-ok; printf 'WORKSPACE_WRITE=ok\\n'; if printf 'outside-write\\n' > {outside_path}; then printf 'OUTSIDE_WRITE=allowed\\n'; else printf 'OUTSIDE_WRITE=blocked\\n'; fi; scratch=$(mktemp); test -f \"$scratch\"; printf 'MKTEMP=ok\\n'; rm -f \"$scratch\"",
 +        cargo_bin = shell_single_quote(&cargo_bin.to_string_lossy()),
-+        expected_toolchain,
-+        expected_cargo_version,
 +        outside_path = shell_single_quote(&outside_path.to_string_lossy()),
 +    );
 +    reset_script(vec![
