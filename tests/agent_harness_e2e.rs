@@ -5159,3 +5159,195 @@ async fn a_wrong_tool_guess_is_retried_not_treated_as_an_auth_blocker_inner() {
 
     stack.shutdown();
 }
+
+/// The real sandboxed orchestrator shell receives the host toolchain homes,
+/// can run Cargo and use its call-local scratch directory, and remains confined
+/// to its configured action directory.
+#[cfg(target_os = "linux")]
+#[test]
+fn sandboxed_shell_forwards_host_toolchain_homes_and_confines_writes() {
+    run_on_agent_stack(
+        "sandboxed_shell_forwards_host_toolchain_homes_and_confines_writes",
+        sandboxed_shell_forwards_host_toolchain_homes_and_confines_writes_inner,
+    );
+}
+
+#[cfg(target_os = "linux")]
+async fn sandboxed_shell_forwards_host_toolchain_homes_and_confines_writes_inner() {
+    let _lock = env_lock();
+
+    // Give this real orchestrator turn a private action directory and make the
+    // host sandbox switch explicit. HOME is separately replaced by the stack
+    // fixture, so these guards pin the actual host Rust toolchain locations.
+    let action_dir = tempdir().expect("action directory");
+    let outside_dir = tempdir().expect("outside directory");
+    let host_home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .expect("host HOME must be set before the stack fixture replaces it");
+    let rustup_home = std::env::var_os("RUSTUP_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| host_home.join(".rustup"));
+    let cargo_home = std::env::var_os("CARGO_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| host_home.join(".cargo"));
+    assert!(
+        rustup_home.is_absolute(),
+        "host RUSTUP_HOME must be absolute"
+    );
+    assert!(cargo_home.is_absolute(), "host CARGO_HOME must be absolute");
+    assert!(rustup_home.is_dir(), "host RUSTUP_HOME must exist");
+    assert!(cargo_home.is_dir(), "host CARGO_HOME must exist");
+    let cargo_path = std::env::split_paths(
+        &std::env::var_os("PATH").expect("host PATH must be set before the stack fixture"),
+    )
+    .map(|dir| dir.join("cargo"))
+    .find(|candidate| candidate.is_file())
+    .expect("cargo must be present on the pinned Linux test PATH");
+    let cargo_bin = cargo_path
+        .parent()
+        .expect("cargo executable must have a parent directory")
+        .canonicalize()
+        .expect("cargo executable directory must exist");
+    let marker_name = format!("agent-harness-shell-{}.txt", std::process::id());
+    let marker_path = action_dir.path().join(&marker_name);
+    let outside_path = outside_dir.path().join("must-stay-unwritable.txt");
+    let command = format!(
+        "set -eu; export PATH={}:$PATH; printf 'RUSTUP_HOME=%s\\nCARGO_HOME=%s\\n' \"$RUSTUP_HOME\" \"$CARGO_HOME\"; printf 'CARGO_EXE=%s\\n' \"$(command -v cargo)\"; cargo --version; printf 'workspace-write-ok\\n' > '{marker_name}'; test \"$(cat '{marker_name}')\" = workspace-write-ok; printf 'WORKSPACE_WRITE=ok\\n'; if printf 'outside-write\\n' > {}; then printf 'OUTSIDE_WRITE=allowed\\n'; else printf 'OUTSIDE_WRITE=blocked\\n'; fi; scratch=$(mktemp); test -f \"$scratch\"; printf 'MKTEMP=ok\\n'; rm -f \"$scratch\"",
+        shell_single_quote(&cargo_bin.to_string_lossy()),
+        shell_single_quote(&outside_path.to_string_lossy())
+    );
+    reset_script(vec![
+        tool_call_completion("shell", json!({ "command": command, "category": "write" })),
+        text_completion("SANDBOXED_SHELL_TURN_COMPLETED"),
+    ]);
+
+    let _action_dir_guard = EnvVarGuard::set_to_path("OPENHUMAN_ACTION_DIR", action_dir.path());
+    let _sandbox_guard = EnvVarGuard::set("OPENHUMAN_SANDBOX", "on");
+    let _rustup_home_guard = EnvVarGuard::set_to_path("RUSTUP_HOME", &rustup_home);
+    let _cargo_home_guard = EnvVarGuard::set_to_path("CARGO_HOME", &cargo_home);
+    let stack = boot_stack().await;
+    // The shell's default local jail grants HOME/.rustup and HOME/.cargo/bin.
+    // Link only those temporary-home entries to the captured host locations;
+    // the default grant resolver canonicalizes them before spawning the jail.
+    std::os::unix::fs::symlink(&rustup_home, stack._tmp.path().join(".rustup"))
+        .expect("link host Rust home into temporary HOME");
+    let fixture_cargo_home = stack._tmp.path().join(".cargo");
+    std::fs::create_dir_all(&fixture_cargo_home).expect("create temporary Cargo home");
+    std::os::unix::fs::symlink(&cargo_bin, fixture_cargo_home.join("bin"))
+        .expect("link host Cargo executable directory into temporary HOME");
+    let mut events = spawn_sse_collector(format!(
+        "{}/events?client_id=harness-sandboxed-shell",
+        stack.rpc_base
+    ))
+    .await;
+    let request_id = send_web_chat(
+        &stack.rpc_base,
+        920,
+        "harness-sandboxed-shell",
+        "thread-sandboxed-shell",
+        "Run the requested shell check.",
+    )
+    .await;
+    let (terminal, results) =
+        collect_turn_tool_results_request(&mut events, Duration::from_secs(120), Some(&request_id))
+            .await;
+    assert_eq!(
+        terminal.get("event").and_then(Value::as_str),
+        Some("chat_done"),
+        "sandboxed shell turn should complete: {terminal}"
+    );
+    let shell_result = results
+        .iter()
+        .find(|frame| frame.get("tool_call_id").and_then(Value::as_str) == Some("call_shell"))
+        .unwrap_or_else(|| panic!("missing shell tool_result event: {results:?}"));
+    assert_eq!(
+        shell_result.get("success"),
+        Some(&json!(true)),
+        "shell command should succeed: {shell_result}"
+    );
+    assert!(marker_path.is_file(), "workspace write did not persist");
+    assert!(
+        !outside_path.exists(),
+        "the local jail allowed a write outside action_dir: {}",
+        outside_path.display()
+    );
+
+    // The second model request must carry the actual shell result. This proves
+    // the assertions observe the real tool response returned through the agent
+    // loop, rather than a scripted model answer or an out-of-band probe.
+    let requests = with_captured(|captured| captured.clone());
+    assert!(
+        requests.len() >= 2,
+        "shell result was not sent to the model"
+    );
+    let call_id = "call_shell";
+    let marker = format!("<tool_result id=\"{call_id}\">");
+    let model_saw_result = requests.iter().skip(1).any(|request| {
+        request
+            .pointer("/body/messages")
+            .and_then(Value::as_array)
+            .is_some_and(|messages| {
+                messages.iter().any(|message| {
+                    if message.get("role").and_then(Value::as_str) == Some("tool")
+                        && message.get("tool_call_id").and_then(Value::as_str) == Some(call_id)
+                    {
+                        let content = message
+                            .get("content")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        return shell_result_contains_all_markers(
+                            content,
+                            &rustup_home,
+                            &cargo_home,
+                            &cargo_bin,
+                        );
+                    }
+                    message
+                        .get("content")
+                        .and_then(Value::as_str)
+                        .and_then(|content| {
+                            content
+                                .split_once(&marker)
+                                .and_then(|(_, result)| result.split_once("</tool_result>"))
+                                .map(|(result, _)| {
+                                    shell_result_contains_all_markers(
+                                        result,
+                                        &rustup_home,
+                                        &cargo_home,
+                                        &cargo_bin,
+                                    )
+                                })
+                        })
+                        .unwrap_or(false)
+                })
+            })
+    });
+    assert!(
+        model_saw_result,
+        "the subsequent model request did not contain the successful shell result: {}",
+        serde_json::to_string_pretty(&requests).unwrap_or_default()
+    );
+
+    stack.shutdown();
+}
+
+#[cfg(target_os = "linux")]
+fn shell_result_contains_all_markers(
+    result: &str,
+    rustup_home: &std::path::Path,
+    cargo_home: &std::path::Path,
+    cargo_bin: &std::path::Path,
+) -> bool {
+    result.contains(format!("RUSTUP_HOME={}", rustup_home.display()).as_str())
+        && result.contains(format!("CARGO_HOME={}", cargo_home.display()).as_str())
+        && result.contains(format!("CARGO_EXE={}", cargo_bin.join("cargo").display()).as_str())
+        && result.contains("cargo ")
+        && result.contains("WORKSPACE_WRITE=ok")
+        && result.contains("OUTSIDE_WRITE=blocked")
+        && result.contains("MKTEMP=ok")
+}
+
+#[cfg(target_os = "linux")]
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
