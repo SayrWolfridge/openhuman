@@ -729,7 +729,7 @@ index bde4641cdb2ada3dec5d418a465fb2def0654691..bb2b791bd76d2e284a379f17792925bb
  | 6.2.3 | Git Read Operations          | RU+WD | `vendor/tinyagents/vendor/tinytools/crates/tinytools-std/src/filesystem/git_operations/test.rs`, `app/test/e2e/specs/tool-shell-git-flow.spec.ts` | ✅     | Was 🟡 — WDIO seeds a fixture repo in OPENHUMAN_WORKSPACE and asserts read ops succeed           |
  | 6.2.4 | Git Write Operations         | RU+WD | `vendor/tinyagents/vendor/tinytools/crates/tinytools-std/src/filesystem/git_operations/test.rs`, `app/test/e2e/specs/tool-shell-git-flow.spec.ts` | ✅     | Was 🟡 — WDIO commits into the same fixture and asserts log advances                             |
 diff --git a/tests/agent_harness_e2e.rs b/tests/agent_harness_e2e.rs
-index a1b73c7aed990f3993ab71d36cf8dec617ec440b..01a7bd84341198e010a3ade872b4667e3a3adc38 100644
+index a1b73c7aed990f3993ab71d36cf8dec617ec440b..eb2ba2a35c2f7ac82fbaf96464fab004a5e4fc1d 100644
 --- a/tests/agent_harness_e2e.rs
 +++ b/tests/agent_harness_e2e.rs
 @@ -36,7 +36,9 @@ use serde_json::{json, Value};
@@ -742,7 +742,7 @@ index a1b73c7aed990f3993ab71d36cf8dec617ec440b..01a7bd84341198e010a3ade872b4667e
  use openhuman_rpc::server::build_core_http_router;
  
  const TEST_RPC_TOKEN: &str = "json-rpc-e2e-local-token";
-@@ -5159,3 +5161,416 @@ async fn a_wrong_tool_guess_is_retried_not_treated_as_an_auth_blocker_inner() {
+@@ -5159,3 +5161,412 @@ async fn a_wrong_tool_guess_is_retried_not_treated_as_an_auth_blocker_inner() {
  
      stack.shutdown();
  }
@@ -814,14 +814,10 @@ index a1b73c7aed990f3993ab71d36cf8dec617ec440b..01a7bd84341198e010a3ade872b4667e
 +    let host_home = host_home.expect("prerequisite check established host HOME");
 +    let host_rustup_home = host_rustup_home.expect("prerequisite check established Rustup home");
 +    let host_cargo_home = host_cargo_home.expect("HOME or CARGO_HOME is required");
-+    let host_cargo_path = host_cargo_path
-+        .expect("prerequisite check found Cargo on PATH")
-+        .canonicalize()
-+        .expect("host Cargo executable must resolve");
-+    let host_rustup_path = host_rustup_path
-+        .expect("prerequisite check found Rustup on PATH")
-+        .canonicalize()
-+        .expect("host Rustup executable must resolve");
++    // Rustup proxies dispatch by executable name: retain the PATH-selected
++    // Cargo name for invocation; staging resolves file targets separately.
++    let host_cargo_path = host_cargo_path.expect("prerequisite check found Cargo on PATH");
++    let host_rustup_path = host_rustup_path.expect("prerequisite check found Rustup on PATH");
 +    assert!(
 +        host_rustup_home.is_absolute(),
 +        "host RUSTUP_HOME must be absolute"
