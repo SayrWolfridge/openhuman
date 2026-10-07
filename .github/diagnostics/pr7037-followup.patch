@@ -40,7 +40,7 @@ index 84a0d60806a7956b83254da3ffdfa3df21af7478..cd8fe7c7fa0af4b2fdeb50368ef485d5
              cmd.env(var, val);
          }
 diff --git a/crates/openhuman-core/src/sandbox/ops_tests.rs b/crates/openhuman-core/src/sandbox/ops_tests.rs
-index 374ced5cb81f21d5704fd404c1430838ade0bdc5..fd98c5bdf66b2d5e88d85f2db3b26ec15b2985b9 100644
+index 374ced5cb81f21d5704fd404c1430838ade0bdc5..8661d9f1cd12d1173680b21c1a474a6375d190ad 100644
 --- a/crates/openhuman-core/src/sandbox/ops_tests.rs
 +++ b/crates/openhuman-core/src/sandbox/ops_tests.rs
 @@ -50,6 +50,13 @@ fn resolve_sandbox_policy_sandboxed_remote_uses_docker() {
@@ -57,7 +57,48 @@ index 374ced5cb81f21d5704fd404c1430838ade0bdc5..fd98c5bdf66b2d5e88d85f2db3b26ec1
  }
  
  #[test]
-@@ -517,6 +524,26 @@ async fn landlock_jail_runs_cargo_and_mktemp_but_blocks_writes_outside() {
+@@ -350,6 +357,40 @@ async fn run_local(policy: &SandboxPolicy, command: &str) -> SandboxExecResult {
+     .unwrap()
+ }
+ 
++#[cfg(unix)]
++#[tokio::test]
++async fn local_jail_forwards_nonempty_toolchain_homes_without_cargo() {
++    let action = tempfile::tempdir().unwrap();
++    let state = tempfile::tempdir().unwrap();
++    let rustup_home = tempfile::tempdir().unwrap();
++    let cargo_home = tempfile::tempdir().unwrap();
++    let rustup_value = rustup_home.path().to_string_lossy().into_owned();
++    let cargo_value = cargo_home.path().to_string_lossy().into_owned();
++    let _env = crate::config::test_env::EnvVarGuard::locked_async()
++        .await
++        .with("RUSTUP_HOME", &rustup_value)
++        .with("CARGO_HOME", &cargo_value);
++    let policy = local_policy(action.path(), state.path());
++
++    // These paths exercise forwarding alone. The child only prints them; no
++    // Cargo command consumes them as though they held a real toolchain.
++    let result = run_local(
++        &policy,
++        "printf '%s\\n' \"${RUSTUP_HOME-}\" \"${CARGO_HOME-}\"",
++    )
++    .await;
++    assert!(
++        result.success(),
++        "toolchain-home probe failed: {}",
++        result.stderr
++    );
++    assert_eq!(
++        result.stdout,
++        format!("{rustup_value}\n{cargo_value}\n"),
++        "local sandbox must forward explicitly configured nonempty toolchain homes"
++    );
++}
++
+ #[cfg(unix)]
+ fn entries(dir: &Path) -> Vec<String> {
+     let mut names: Vec<String> = std::fs::read_dir(dir)
+@@ -517,6 +558,26 @@ async fn landlock_jail_runs_cargo_and_mktemp_but_blocks_writes_outside() {
          let r = run_local(&policy, &format!("{quoted_cargo} --version")).await;
          assert!(r.success(), "cargo failed under the jail: {}", r.stderr);
          assert!(r.stdout.starts_with("cargo "), "stdout: {}", r.stdout);
@@ -108,10 +149,20 @@ index bde4641cdb2ada3dec5d418a465fb2def0654691..69d84f387036417e1723ad239858c081
  | 6.2.3 | Git Read Operations          | RU+WD | `vendor/tinyagents/vendor/tinytools/crates/tinytools-std/src/filesystem/git_operations/test.rs`, `app/test/e2e/specs/tool-shell-git-flow.spec.ts` | ✅     | Was 🟡 — WDIO seeds a fixture repo in OPENHUMAN_WORKSPACE and asserts read ops succeed           |
  | 6.2.4 | Git Write Operations         | RU+WD | `vendor/tinyagents/vendor/tinytools/crates/tinytools-std/src/filesystem/git_operations/test.rs`, `app/test/e2e/specs/tool-shell-git-flow.spec.ts` | ✅     | Was 🟡 — WDIO commits into the same fixture and asserts log advances                             |
 diff --git a/tests/agent_harness_e2e.rs b/tests/agent_harness_e2e.rs
-index a1b73c7aed990f3993ab71d36cf8dec617ec440b..6154ef01c4c5d0cea4322a95663024d8f2dc1612 100644
+index a1b73c7aed990f3993ab71d36cf8dec617ec440b..c661e054f98f52bcb6b3d83662f5dbf1bee17e4a 100644
 --- a/tests/agent_harness_e2e.rs
 +++ b/tests/agent_harness_e2e.rs
-@@ -5159,3 +5159,195 @@ async fn a_wrong_tool_guess_is_retried_not_treated_as_an_auth_blocker_inner() {
+@@ -36,7 +36,9 @@ use serde_json::{json, Value};
+ use tempfile::tempdir;
+ 
+ use openhuman_core::agent::harness::AgentDefinitionRegistry;
++use openhuman_core::config::RuntimeConfig;
+ use openhuman_core::core::auth::{init_rpc_token, CORE_TOKEN_ENV_VAR};
++use openhuman_core::sandbox::grants::resolve_local_jail_grants;
+ use openhuman_rpc::server::build_core_http_router;
+ 
+ const TEST_RPC_TOKEN: &str = "json-rpc-e2e-local-token";
+@@ -5159,3 +5161,237 @@ async fn a_wrong_tool_guess_is_retried_not_treated_as_an_auth_blocker_inner() {
  
      stack.shutdown();
  }
@@ -182,15 +233,57 @@ index a1b73c7aed990f3993ab71d36cf8dec617ec440b..6154ef01c4c5d0cea4322a95663024d8
 +    let _rustup_home_guard = EnvVarGuard::set_to_path("RUSTUP_HOME", &rustup_home);
 +    let _cargo_home_guard = EnvVarGuard::set_to_path("CARGO_HOME", &cargo_home);
 +    let stack = boot_stack().await;
-+    // The shell's default local jail grants HOME/.rustup and HOME/.cargo/bin.
-+    // Link only those temporary-home entries to the captured host locations;
-+    // the default grant resolver canonicalizes them before spawning the jail.
-+    std::os::unix::fs::symlink(&rustup_home, stack._tmp.path().join(".rustup"))
-+        .expect("link host Rust home into temporary HOME");
-+    let fixture_cargo_home = stack._tmp.path().join(".cargo");
-+    std::fs::create_dir_all(&fixture_cargo_home).expect("create temporary Cargo home");
-+    std::os::unix::fs::symlink(&cargo_bin, fixture_cargo_home.join("bin"))
-+        .expect("link host Cargo executable directory into temporary HOME");
++    let default_grants = || {
++        resolve_local_jail_grants(
++            Some(stack._tmp.path()),
++            &RuntimeConfig::default().local_jail,
++        )
++    };
++    let is_covered = |path: &Path| {
++        let canonical = path.canonicalize().expect("captured toolchain path exists");
++        let grants = default_grants();
++        grants
++            .read_only
++            .iter()
++            .chain(&grants.read_write)
++            .any(|grant| canonical.starts_with(grant))
++    };
++    if is_covered(&rustup_home) && is_covered(&cargo_home) && is_covered(&cargo_bin) {
++        // Pinned CI keeps the real toolchain under /usr/local. The default
++        // resolver admits those captured paths directly, outside fixture HOME.
++        assert!(
++            ["/usr/local", "/opt"].iter().any(|root| {
++                let root = Path::new(root);
++                [&rustup_home, &cargo_home, &cargo_bin]
++                    .iter()
++                    .all(|path| path.canonicalize().is_ok_and(|p| p.starts_with(root)))
++            }),
++            "captured paths use default grants, but are outside the expected system roots"
++        );
++    } else {
++        let canonical_home = host_home.canonicalize().expect("host HOME exists");
++        let home_rustup = canonical_home.join(".rustup").canonicalize();
++        let home_cargo = canonical_home.join(".cargo").canonicalize();
++        let home_cargo_bin = canonical_home.join(".cargo/bin").canonicalize();
++        assert!(
++            rustup_home.canonicalize().ok().as_ref() == home_rustup.as_ref().ok()
++                && cargo_home.canonicalize().ok().as_ref() == home_cargo.as_ref().ok()
++                && cargo_bin.canonicalize().ok().as_ref() == home_cargo_bin.as_ref().ok(),
++            "captured homes outside default system grants must use conventional HOME/.rustup and HOME/.cargo/bin; custom external homes require an explicit policy decision"
++        );
++        // The fixture grants only the canonical default HOME locations; keep
++        // Cargo credentials outside the linked tree.
++        std::os::unix::fs::symlink(&rustup_home, stack._tmp.path().join(".rustup"))
++            .expect("link conventional host Rust home into temporary HOME");
++        let fixture_cargo_home = stack._tmp.path().join(".cargo");
++        std::fs::create_dir_all(&fixture_cargo_home).expect("create temporary Cargo home");
++        std::os::unix::fs::symlink(&cargo_bin, fixture_cargo_home.join("bin"))
++            .expect("link conventional host Cargo bin into temporary HOME");
++        assert!(
++            is_covered(&rustup_home) && is_covered(&cargo_bin),
++            "canonicalized conventional HOME aliases must be admitted by default grants"
++        );
++    }
 +    let mut events = spawn_sse_collector(format!(
 +        "{}/events?client_id=harness-sandboxed-shell",
 +        stack.rpc_base
