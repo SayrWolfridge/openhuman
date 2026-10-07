@@ -507,6 +507,7 @@ fn host_has(program: &str) -> bool {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn landlock_jail_runs_cargo_and_mktemp_but_blocks_writes_outside() {
+    let _env = crate::config::test_env::EnvVarGuard::locked_async().await;
     if !landlock_in_force() {
         return;
     }
@@ -524,26 +525,6 @@ async fn landlock_jail_runs_cargo_and_mktemp_but_blocks_writes_outside() {
         let r = run_local(&policy, &format!("{quoted_cargo} --version")).await;
         assert!(r.success(), "cargo failed under the jail: {}", r.stderr);
         assert!(r.stdout.starts_with("cargo "), "stdout: {}", r.stdout);
-
-        // The fixture uses the host's real toolchain, so compare the sandbox
-        // values with the environment that selected that toolchain. This avoids
-        // process-global env mutation and exercises the actual spawn path.
-        let expected_homes = ["RUSTUP_HOME", "CARGO_HOME"].map(|name| {
-            std::env::var_os(name)
-                .map(|value| value.to_string_lossy().into_owned())
-                .unwrap_or_default()
-        });
-        let r = run_local(
-            &policy,
-            "printf '%s\\n' \"${RUSTUP_HOME-}\" \"${CARGO_HOME-}\"",
-        )
-        .await;
-        assert!(r.success(), "toolchain home probe failed: {}", r.stderr);
-        assert_eq!(
-            r.stdout,
-            format!("{}\n{}\n", expected_homes[0], expected_homes[1]),
-            "sandboxed commands must inherit explicitly configured Rust toolchain homes"
-        );
     } else {
         eprintln!("SKIP cargo: build toolchain executable is absent on this host");
     }
@@ -668,3 +649,7 @@ fn sandbox_off_value_keeps_sandbox_on_otherwise() {
         assert!(!sandbox_off_value(v), "{v:?} must leave the sandbox on");
     }
 }
+
+#[cfg(unix)]
+#[path = "ops_toolchain_tests.rs"]
+mod toolchain_homes;

@@ -89,6 +89,8 @@ Applies to every release, all platforms.
 - [ ] **OS-native notification toasts fire** — Trigger a notification from inside the app (e.g. memory captured, agent finished). Expected: a libnotify-style toast appears outside the app window. (CI Linux sees only Xvfb; this surface verifies on a real desktop.)
 - [ ] **Headless supervisor update stages without self-exit** — On a Linux service deployment with `[update] restart_strategy = "supervisor"` and `rpc_mutations_enabled = false`, stage a new core binary through the documented operator flow. Expected: the running process stays up until the supervisor restart, the staged binary is present on disk, and `systemctl restart openhuman` (or equivalent) picks up the new version.
 
+- [ ] **Native sandbox preserves installed Rust toolchain homes** — In an isolated Linux profile with Rust installed through explicit absolute `RUSTUP_HOME` and `CARGO_HOME` outside the profile HOME and system toolchain roots, run `cargo --version` through the sandboxed shell. Expected: the installed Cargo version is returned, temporary files use the sandbox scratch directory, workspace writes succeed, and a write to a separately prepared outside directory is denied. Verify the configured homes match the values observed inside the native sandbox. Confirm Cargo registry/git cache writes succeed and toolchain files and Cargo credentials retain their access restrictions.
+
 ### Cross-platform
 
 - [ ] **Agent files land in a visible folder** — Ask the agent for a short document or deck. Expected: the file appears in `~/OpenHuman/projects/Files` under its title (not in `~/.openhuman`); **Show in folder** in the chat Files panel opens the file manager at it; Settings → Agent OS access → **Files folder** shows that path, **Show in folder** opens it, and choosing another folder sends the next file there while the earlier file still opens. On an upgraded install, files from before the upgrade have moved into the folder.
@@ -130,5 +132,3 @@ Notes:
 ```
 
 Paste the filled block as a commit comment on the `v<version>-staging` tagged commit before promoting to production.
-
-- [ ] **Native sandbox preserves installed Rust toolchain homes** — In an isolated Linux profile with Rust installed through explicit `RUSTUP_HOME` and `CARGO_HOME`, run `cargo --version` through the sandboxed shell. Expected: the installed Cargo version is returned, temporary files use the sandbox scratch directory, workspace writes succeed, and a write to a separately prepared outside directory is denied. Verify the configured homes match the values observed inside the native sandbox.
