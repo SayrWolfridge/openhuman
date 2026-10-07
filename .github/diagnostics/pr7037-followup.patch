@@ -570,7 +570,7 @@ index bde4641cdb2ada3dec5d418a465fb2def0654691..bb2b791bd76d2e284a379f17792925bb
  | 6.2.3 | Git Read Operations          | RU+WD | `vendor/tinyagents/vendor/tinytools/crates/tinytools-std/src/filesystem/git_operations/test.rs`, `app/test/e2e/specs/tool-shell-git-flow.spec.ts` | ✅     | Was 🟡 — WDIO seeds a fixture repo in OPENHUMAN_WORKSPACE and asserts read ops succeed           |
  | 6.2.4 | Git Write Operations         | RU+WD | `vendor/tinyagents/vendor/tinytools/crates/tinytools-std/src/filesystem/git_operations/test.rs`, `app/test/e2e/specs/tool-shell-git-flow.spec.ts` | ✅     | Was 🟡 — WDIO commits into the same fixture and asserts log advances                             |
 diff --git a/tests/agent_harness_e2e.rs b/tests/agent_harness_e2e.rs
-index a1b73c7aed990f3993ab71d36cf8dec617ec440b..da4bc36955ae5f060949517679dca25aef25a3b7 100644
+index a1b73c7aed990f3993ab71d36cf8dec617ec440b..4763ea6cbb94144e90b4d3d805b9dc7ae49acc25 100644
 --- a/tests/agent_harness_e2e.rs
 +++ b/tests/agent_harness_e2e.rs
 @@ -36,7 +36,9 @@ use serde_json::{json, Value};
@@ -583,7 +583,7 @@ index a1b73c7aed990f3993ab71d36cf8dec617ec440b..da4bc36955ae5f060949517679dca25a
  use openhuman_rpc::server::build_core_http_router;
  
  const TEST_RPC_TOKEN: &str = "json-rpc-e2e-local-token";
-@@ -5159,3 +5161,361 @@ async fn a_wrong_tool_guess_is_retried_not_treated_as_an_auth_blocker_inner() {
+@@ -5159,3 +5161,383 @@ async fn a_wrong_tool_guess_is_retried_not_treated_as_an_auth_blocker_inner() {
  
      stack.shutdown();
  }
@@ -729,6 +729,28 @@ index a1b73c7aed990f3993ab71d36cf8dec617ec440b..da4bc36955ae5f060949517679dca25a
 +        rustup_home.join("settings.toml"),
 +    )
 +    .expect("copy real Rustup selection metadata");
++    // Rustup initializes these control directories even for read-only queries.
++    // Prepare the existing-install layout before the jail makes the home read-only.
++    for directory in ["downloads", "tmp", "update-hashes"] {
++        std::fs::create_dir_all(rustup_home.join(directory))
++            .expect("create Rustup control-directory fixture");
++    }
++    if let Ok(entries) = std::fs::read_dir(host_rustup_home.join("update-hashes")) {
++        for entry in entries {
++            let entry = entry.expect("read installed Rustup update-hash metadata");
++            if entry
++                .file_type()
++                .expect("Rustup metadata file type")
++                .is_file()
++            {
++                std::fs::copy(
++                    entry.path(),
++                    rustup_home.join("update-hashes").join(entry.file_name()),
++                )
++                .expect("copy installed Rustup update-hash metadata");
++            }
++        }
++    }
 +    let stage_executable = |source: &Path, destination: std::path::PathBuf| {
 +        let source = source
 +            .canonicalize()
