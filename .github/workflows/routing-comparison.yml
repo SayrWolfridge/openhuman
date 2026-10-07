@@ -1,52 +1,14 @@
-name: Sandbox Rust homes verification
+name: PR 6978 pinned Linux follow-up
 on:
   push:
-    branches: [codex/routing-ci-comparison]
+    branches:
+      - codex/routing-ci-comparison
   workflow_dispatch:
 permissions:
   contents: read
   actions: read
 jobs:
-  changed-line-coverage:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: 6c8c7ad93f1a66067c22bff382b9ddcf306294cd
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ github.sha }}
-          path: diagnostic-inputs
-          persist-credentials: false
-      - uses: actions/download-artifact@v4
-        with:
-          name: sandbox-rust-homes
-          run-id: 37507508324
-          github-token: ${{ github.token }}
-          path: measured
-      - name: Match tested Rust sources and compute exact changed-line coverage
-        run: |
-          git apply --check diagnostic-inputs/.github/diagnostics/sandbox-homes.patch
-          git apply diagnostic-inputs/.github/diagnostics/sandbox-homes.patch
-          git diff --check
-          sha256sum -c measured/source-hashes.txt
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
-      - name: Install diff-cover
-        run: pip install 'diff-cover>=9.2.0'
-      - name: Project changed-line coverage gate
-        run: bash scripts/ci/self-hosted/diff-cover.sh measured/lcov 6c8c7ad93f1a66067c22bff382b9ddcf306294cd ci-out/diff-cover
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        if: always()
-        with:
-          name: sandbox-rust-homes-coverage
-          path: ci-out/
-          retention-days: 14
-  native-lint:
+  native-validation:
     runs-on: ubuntu-22.04
     timeout-minutes: 75
     container:
@@ -59,11 +21,15 @@ jobs:
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
       RUST_MIN_STACK: '67108864'
+      LLVM_PROFILE_FILE_NAME: openhuman-%8m.profraw
       GH_TOKEN: ${{ github.token }}
+      PR_NUMBER: '6978'
+      SOURCE_BASE: '7578346c85973c61afbfe6e24d88eb0a174ba014'
+      COMPARE_BASE: '7578346c85973c61afbfe6e24d88eb0a174ba014'
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: 6c8c7ad93f1a66067c22bff382b9ddcf306294cd
+          ref: 7578346c85973c61afbfe6e24d88eb0a174ba014
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/checkout@v7
@@ -73,38 +39,144 @@ jobs:
           persist-credentials: false
       - name: Prepare exact source and canonical dependencies
         run: |
+          set -euo pipefail
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          test "$(git rev-parse HEAD)" = "$SOURCE_BASE"
+          git cat-file -e "$COMPARE_BASE^{commit}"
           bash scripts/ci/checkout-submodules.sh
           pnpm install --frozen-lockfile
-          mkdir -p ci-out
-          git apply --check diagnostic-inputs/.github/diagnostics/sandbox-homes.patch
-          git apply diagnostic-inputs/.github/diagnostics/sandbox-homes.patch
+          mkdir -p ci-out/lcov
+          git rev-parse HEAD > ci-out/source-base.txt
+          printf 'RUSTUP_HOME=%s\nCARGO_HOME=%s\nHOME=%s\n' "$RUSTUP_HOME" "$CARGO_HOME" "$HOME" > ci-out/rust-homes.txt
+          rustc -V > ci-out/rustc-version.txt
+          cargo -V > ci-out/cargo-version.txt
+          sha256sum "diagnostic-inputs/.github/diagnostics/pr6978-followup.patch" "diagnostic-inputs/.github/diagnostics/pr6978-source-hashes.txt" "diagnostic-inputs/.github/diagnostics/pr6978-rust-source-files.txt" > ci-out/diagnostic-input-hashes.txt
+          git apply --check "diagnostic-inputs/.github/diagnostics/pr6978-followup.patch"
+          git apply "diagnostic-inputs/.github/diagnostics/pr6978-followup.patch"
           git diff --check
           git diff --binary > ci-out/applied.patch
-          cmp ci-out/applied.patch diagnostic-inputs/.github/diagnostics/sandbox-homes.patch
-          sha256sum crates/openhuman-core/src/sandbox/ops.rs crates/openhuman-core/src/sandbox/ops_tests.rs > ci-out/source-hashes.txt
+          cmp ci-out/applied.patch "diagnostic-inputs/.github/diagnostics/pr6978-followup.patch"
+          cp "diagnostic-inputs/.github/diagnostics/pr6978-source-hashes.txt" ci-out/source-hashes.txt
+          sha256sum -c "diagnostic-inputs/.github/diagnostics/pr6978-source-hashes.txt"
+          test -f "diagnostic-inputs/.github/diagnostics/pr6978-rust-source-files.txt"
+          git diff --name-only -- '*.rs' | sort > ci-out/changed-rust-files.txt
+          pnpm rust:layout
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: . -> target
           shared-key: ci-fast-rust-cov
           cache-on-failure: false
+      - uses: taiki-e/install-action@cargo-llvm-cov
       - name: Install canonical test modules
-        run: bash scripts/ci/self-hosted/install-test-modules.sh "/opt/openhuman-test-modules/${GITHUB_RUN_ID}-sandbox" ci-out/test-modules.env
+        run: bash scripts/ci/self-hosted/install-test-modules.sh "/opt/openhuman-test-modules/${GITHUB_RUN_ID}-pr6978" ci-out/test-modules.env
+      - name: Clear coverage and run scoped Rust regressions
+        run: bash scripts/ci-cancel-aware.sh cargo llvm-cov clean --workspace
+      - name: Run RPC, core web-chat, and provider routing regressions
+        run: |
+          set -euo pipefail
+          set -a
+          source ci-out/test-modules.env
+          set +a
+          unset RUSTFLAGS
+          FEATURES="$(bash scripts/ci/product-features.sh)"
+          bash scripts/ci-cancel-aware.sh cargo llvm-cov --features "$FEATURES" --no-report -p openhuman-cli --test json_rpc_e2e -- --test-threads=1 2>&1 | tee ci-out/json-rpc-e2e.log
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed;' ci-out/json-rpc-e2e.log
+          bash scripts/ci-cancel-aware.sh cargo llvm-cov --features "$FEATURES" --no-report -p openhuman --lib -- web_chat:: --test-threads=1 2>&1 | tee ci-out/core-web-chat.log
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed;' ci-out/core-web-chat.log
+          bash scripts/ci-cancel-aware.sh cargo llvm-cov --features "$FEATURES" --no-report -p openhuman --lib -- inference::provider:: --test-threads=1 2>&1 | tee ci-out/core-provider-routing.log
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed;' ci-out/core-provider-routing.log
+      - name: Run affected SPA tests with LCOV
+        env:
+          NODE_ENV: test
+          VITEST_MAX_WORKERS: '3'
+        run: |
+          set -euo pipefail
+          bash scripts/ci-cancel-aware.sh pnpm --filter openhuman-app exec vitest run --config test/vitest.config.ts --coverage src/features/conversations/Conversations.processSourceCommand.test.tsx src/pages/__tests__/Conversations.render.test.tsx 2>&1 | tee ci-out/frontend-tests.log
+          test -s app/coverage/lcov.info
+          sed -E -e 's#^SF:(src/)#SF:app/\1#' -e 's#^SF:(\./src/)#SF:app/src/#' app/coverage/lcov.info > ci-out/lcov/lcov-frontend.info
+      - name: Typecheck, lint, and format affected frontend tests
+        run: |
+          set -euo pipefail
+          bash scripts/ci-cancel-aware.sh pnpm typecheck 2>&1 | tee ci-out/frontend-typecheck.log
+          bash scripts/ci-cancel-aware.sh pnpm lint 2>&1 | tee ci-out/frontend-lint.log
+          pnpm --filter openhuman-app exec prettier --check src/features/conversations/Conversations.tsx src/features/conversations/Conversations.processSourceCommand.test.tsx src/pages/__tests__/Conversations.render.test.tsx 2>&1 | tee ci-out/frontend-prettier.log
       - name: Whole-workspace Rust formatting
         run: |
+          set -euo pipefail
           bash scripts/ci-cancel-aware.sh cargo fmt --all --check 2>&1 | tee ci-out/full-rust-format.log
           bash scripts/ci-cancel-aware.sh cargo fmt --manifest-path crates/openhuman-app/Cargo.toml --all --check 2>&1 | tee ci-out/tauri-rust-format.log
-      - name: Changed core crate Clippy
+      - name: Core Clippy with warnings denied
         run: |
+          set -euo pipefail
           set -a
           source ci-out/test-modules.env
           set +a
           unset RUSTFLAGS
           FEATURES="$(bash scripts/ci/product-features.sh)"
           bash scripts/ci-cancel-aware.sh cargo clippy --features "$FEATURES" -p openhuman --lib -- -D warnings 2>&1 | tee ci-out/core-clippy.log
+      - name: Collect Rust LCOV and normalize source paths
+        run: |
+          set -euo pipefail
+          bash scripts/ci-cancel-aware.sh cargo llvm-cov report --lcov --output-path ci-out/lcov/lcov-core.info
+          sed -i 's|/__w/openhuman/openhuman/||g' ci-out/lcov/lcov-core.info
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
-          name: sandbox-rust-homes-lint
+          name: pr6978-followup-linux
+          path: ci-out/
+          retention-days: 14
+
+  changed-line-coverage:
+    runs-on: ubuntu-22.04
+    needs: native-validation
+    if: needs.native-validation.result == 'success'
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: 7578346c85973c61afbfe6e24d88eb0a174ba014
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          path: diagnostic-inputs
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: pr6978-followup-linux
+          path: measured
+      - name: Prove the measured source and input patch match
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = '7578346c85973c61afbfe6e24d88eb0a174ba014'
+          git apply --check diagnostic-inputs/.github/diagnostics/pr6978-followup.patch
+          git apply diagnostic-inputs/.github/diagnostics/pr6978-followup.patch
+          git diff --check
+          git diff --binary > measured-reapplied.patch
+          cmp measured-reapplied.patch diagnostic-inputs/.github/diagnostics/pr6978-followup.patch
+          sha256sum -c diagnostic-inputs/.github/diagnostics/pr6978-source-hashes.txt
+          cmp measured/source-hashes.txt diagnostic-inputs/.github/diagnostics/pr6978-source-hashes.txt
+          test "$(cat measured/source-base.txt)" = '7578346c85973c61afbfe6e24d88eb0a174ba014'
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install diff-cover on the hosted runner
+        run: pip install 'diff-cover>=9.2.0'
+      - name: Require changed production Rust files in LCOV
+        run: |
+          set -euo pipefail
+          mapfile -t changed_production_rust < <(sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' diagnostic-inputs/.github/diagnostics/pr6978-rust-source-files.txt)
+          if [ "${#changed_production_rust[@]}" -gt 0 ]; then
+            bash scripts/ci/assert-coverage-presence.sh measured/lcov/lcov-core.info --files "${changed_production_rust[@]}"
+          else
+            echo 'No changed production Rust source paths in the supplied roster.'
+          fi
+      - name: Enforce >= 80 percent changed-line coverage against full PR base
+        run: bash scripts/ci/self-hosted/diff-cover.sh measured/lcov '7578346c85973c61afbfe6e24d88eb0a174ba014' ci-out/diff-cover
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: pr6978-followup-linux-coverage
           path: ci-out/
           retention-days: 14
