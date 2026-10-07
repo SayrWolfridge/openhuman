@@ -1,3 +1,363 @@
+diff --git a/crates/openhuman-core/src/sandbox/grants.rs b/crates/openhuman-core/src/sandbox/grants.rs
+index 7aaecac3978efbb4d546b72618470b7a3a62397d..d0c3748656fa771ce9e1de1354ab7a45840b0e4b 100644
+--- a/crates/openhuman-core/src/sandbox/grants.rs
++++ b/crates/openhuman-core/src/sandbox/grants.rs
+@@ -56,6 +56,7 @@ pub fn resolve_local_jail_grants(home: Option<&Path>, cfg: &LocalJailConfig) ->
+                 b.read_only(&h.join(dir), "toolchain");
+             }
+         }
++        b.add_host_toolchain_homes();
+         for dir in SYSTEM_TOOLCHAIN_DIRS {
+             b.read_only(Path::new(dir), "toolchain");
+         }
+@@ -167,14 +168,33 @@ impl<'a> Builder<'a> {
+         }
+     }
+ 
+-    /// Grant only the parts of `~/.cargo` that jailed Cargo needs. The root is
++    /// Admit explicitly selected host Rust homes when the built-in toolchain
++    /// grants are enabled. Match `ops`' Unicode environment-value semantics;
++    /// jail admission additionally requires absolute paths to existing dirs.
++    fn add_host_toolchain_homes(&mut self) {
++        if let Ok(raw) = std::env::var("RUSTUP_HOME") {
++            let rustup = PathBuf::from(raw);
++            if rustup.is_absolute() && rustup.is_dir() {
++                self.read_only(&rustup, "RUSTUP_HOME");
++            }
++        }
++
++        if let Ok(raw) = std::env::var("CARGO_HOME") {
++            let cargo = PathBuf::from(raw);
++            if cargo.is_absolute() {
++                self.add_cargo_home(&cargo);
++            }
++        }
++    }
++
++    /// Grant only the parts of a Cargo home that jailed Cargo needs. Its root is
+     /// never writable: `bin` and Cargo configuration run later outside the
+     /// jail, so writable access there would persist an escape for host tools.
+     fn add_cargo_home(&mut self, cargo: &Path) {
+         if !cargo.is_dir() {
+             return;
+         }
+-        tracing::debug!("[sandbox:grants] granting ~/.cargo parts with host code read-only");
++        tracing::debug!("[sandbox:grants] granting Cargo home parts with host code read-only");
+         self.read_only(&cargo.join("bin"), "toolchain");
+         self.read_write(&cargo.join("registry"), "toolchain");
+         self.read_write(&cargo.join("git"), "toolchain");
+diff --git a/crates/openhuman-core/src/sandbox/grants_tests.rs b/crates/openhuman-core/src/sandbox/grants_tests.rs
+index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..77001f6b85bd8b9191bb33164fd9709b5508af7c 100644
+--- a/crates/openhuman-core/src/sandbox/grants_tests.rs
++++ b/crates/openhuman-core/src/sandbox/grants_tests.rs
+@@ -1,4 +1,5 @@
+ use super::*;
++use crate::config::test_env::EnvVarGuard;
+ use std::fs;
+ use std::path::{Path, PathBuf};
+ 
+@@ -24,6 +25,12 @@ fn all(g: &JailGrants) -> Vec<PathBuf> {
+     g.read_only.iter().chain(&g.read_write).cloned().collect()
+ }
+ 
++fn isolated_toolchain_env() -> EnvVarGuard {
++    EnvVarGuard::locked()
++        .without("RUSTUP_HOME")
++        .without("CARGO_HOME")
++}
++
+ /// A grant reaches a credential store if it IS one, is inside one, or contains
+ /// one (Landlock grants are recursive, so a parent grant exposes the child).
+ fn reaches_credentials(grants: &[PathBuf], home: &Path) -> Option<PathBuf> {
+@@ -40,6 +47,7 @@ fn reaches_credentials(grants: &[PathBuf], home: &Path) -> Option<PathBuf> {
+ 
+ #[test]
+ fn credential_dirs_are_never_granted_by_default() {
++    let _env = isolated_toolchain_env();
+     let home = fake_home();
+     let g = resolve_local_jail_grants(Some(home.path()), &LocalJailConfig::default());
+     assert_eq!(reaches_credentials(&all(&g), home.path()), None);
+@@ -47,6 +55,7 @@ fn credential_dirs_are_never_granted_by_default() {
+ 
+ #[test]
+ fn credential_dirs_are_never_granted_even_when_extras_ask() {
++    let _env = isolated_toolchain_env();
+     let home = fake_home();
+     let cfg = LocalJailConfig {
+         extra_read_only: vec![
+@@ -67,6 +76,7 @@ fn credential_dirs_are_never_granted_even_when_extras_ask() {
+ 
+ #[test]
+ fn credential_floor_holds_for_a_symlink_into_a_credential_dir() {
++    let _env = isolated_toolchain_env();
+     let home = fake_home();
+     std::os::unix::fs::symlink(home.path().join(".ssh"), home.path().join("innocent")).unwrap();
+     let cfg = LocalJailConfig {
+@@ -79,6 +89,7 @@ fn credential_floor_holds_for_a_symlink_into_a_credential_dir() {
+ 
+ #[test]
+ fn toolchain_homes_are_granted_when_they_exist() {
++    let _env = isolated_toolchain_env();
+     let home = fake_home();
+     let cargo = home.path().join(".cargo");
+     for dir in ["bin", "registry", "git"] {
+@@ -117,8 +128,183 @@ fn toolchain_homes_are_granted_when_they_exist() {
+     }
+ }
+ 
++#[test]
++fn configured_absolute_rust_homes_outside_home_use_selective_grants() {
++    let home = fake_home();
++    let install = tempfile::tempdir().unwrap();
++    let rustup = install.path().join("rustup-home");
++    let cargo = install.path().join("cargo-home");
++    fs::create_dir_all(&rustup).unwrap();
++    for dir in ["bin", "registry", "git"] {
++        fs::create_dir_all(cargo.join(dir)).unwrap();
++    }
++    for file in ["config.toml", "config", "env", "credentials.toml"] {
++        fs::write(cargo.join(file), "").unwrap();
++    }
++
++    let _env = EnvVarGuard::locked()
++        .with("RUSTUP_HOME", &rustup)
++        .with("CARGO_HOME", &cargo);
++    let grants = resolve_local_jail_grants(Some(home.path()), &LocalJailConfig::default());
++    let rustup = canon(&rustup);
++    let cargo = canon(&cargo);
++
++    assert!(has(&grants.read_only, &rustup));
++    assert!(!has(&grants.read_write, &rustup));
++    assert!(!all(&grants).iter().any(|path| path == &cargo));
++    assert!(has(&grants.read_only, &cargo.join("bin")));
++    for file in ["config.toml", "config", "env"] {
++        assert!(
++            has(&grants.read_only, &cargo.join(file)),
++            "{file} should be read-only"
++        );
++    }
++    assert!(has(&grants.read_write, &cargo.join("registry")));
++    assert!(has(&grants.read_write, &cargo.join("git")));
++    assert!(!all(&grants)
++        .iter()
++        .any(|path| path == &cargo.join("credentials.toml")));
++    assert_eq!(reaches_credentials(&all(&grants), home.path()), None);
++}
++
++#[test]
++fn custom_rust_homes_inside_credential_stores_are_refused() {
++    let home = fake_home();
++    let rustup = home.path().join(".ssh").join("rustup");
++    let cargo = home.path().join(".aws").join("cargo");
++    fs::create_dir_all(&rustup).unwrap();
++    for dir in ["bin", "registry", "git"] {
++        fs::create_dir_all(cargo.join(dir)).unwrap();
++    }
++    for file in ["config.toml", "config", "env"] {
++        fs::write(cargo.join(file), "").unwrap();
++    }
++
++    let _env = EnvVarGuard::locked()
++        .with("RUSTUP_HOME", &rustup)
++        .with("CARGO_HOME", &cargo);
++    let grants = resolve_local_jail_grants(Some(home.path()), &LocalJailConfig::default());
++
++    assert!(!all(&grants).iter().any(|path| path.starts_with(&rustup)));
++    assert!(!all(&grants).iter().any(|path| path.starts_with(&cargo)));
++    assert_eq!(reaches_credentials(&all(&grants), home.path()), None);
++}
++
++#[test]
++fn custom_rust_homes_skip_relative_and_missing_paths() {
++    let home = fake_home();
++    let cwd = std::env::current_dir().unwrap();
++    let relative_rustup = tempfile::Builder::new()
++        .prefix("relative-rustup-home-")
++        .tempdir_in(&cwd)
++        .unwrap();
++    let relative_cargo = tempfile::Builder::new()
++        .prefix("relative-cargo-home-")
++        .tempdir_in(&cwd)
++        .unwrap();
++    for dir in ["bin", "registry", "git"] {
++        fs::create_dir_all(relative_cargo.path().join(dir)).unwrap();
++    }
++    let relative_rustup_name = relative_rustup.path().file_name().unwrap();
++    let relative_cargo_name = relative_cargo.path().file_name().unwrap();
++    assert!(Path::new(relative_rustup_name).is_relative());
++    assert!(Path::new(relative_cargo_name).is_relative());
++
++    {
++        let _env = EnvVarGuard::locked()
++            .with("RUSTUP_HOME", relative_rustup_name)
++            .with("CARGO_HOME", relative_cargo_name);
++        let grants = resolve_local_jail_grants(Some(home.path()), &LocalJailConfig::default());
++        let rustup = canon(relative_rustup.path());
++        let cargo = canon(relative_cargo.path());
++        assert!(!all(&grants).iter().any(|path| path.starts_with(&rustup)));
++        assert!(!all(&grants).iter().any(|path| path.starts_with(&cargo)));
++    }
++
++    let missing_root = tempfile::tempdir().unwrap();
++    let missing_rustup = missing_root.path().join("missing-rustup");
++    let missing_cargo = missing_root.path().join("missing-cargo");
++    {
++        let _env = EnvVarGuard::locked()
++            .with("RUSTUP_HOME", &missing_rustup)
++            .with("CARGO_HOME", &missing_cargo);
++        let grants = resolve_local_jail_grants(Some(home.path()), &LocalJailConfig::default());
++        assert!(!all(&grants)
++            .iter()
++            .any(|path| path.starts_with(&missing_rustup)));
++        assert!(!all(&grants)
++            .iter()
++            .any(|path| path.starts_with(&missing_cargo)));
++    }
++}
++
++#[test]
++fn configured_rust_homes_deduplicate_existing_home_grants() {
++    let home = fake_home();
++    let cargo = home.path().join(".cargo");
++    for dir in ["bin", "registry", "git"] {
++        fs::create_dir_all(cargo.join(dir)).unwrap();
++    }
++    for file in ["config.toml", "config", "env"] {
++        fs::write(cargo.join(file), "").unwrap();
++    }
++    let rustup = home.path().join(".rustup");
++
++    let _env = EnvVarGuard::locked()
++        .with("RUSTUP_HOME", &rustup)
++        .with("CARGO_HOME", &cargo);
++    let grants = resolve_local_jail_grants(Some(home.path()), &LocalJailConfig::default());
++    let rustup = canon(&rustup);
++    let cargo = canon(&cargo);
++
++    assert_eq!(
++        grants
++            .read_only
++            .iter()
++            .filter(|path| *path == &rustup)
++            .count(),
++        1
++    );
++    assert_eq!(
++        grants
++            .read_only
++            .iter()
++            .filter(|path| *path == &cargo.join("bin"))
++            .count(),
++        1
++    );
++    for file in ["config.toml", "config", "env"] {
++        assert_eq!(
++            grants
++                .read_only
++                .iter()
++                .filter(|path| *path == &cargo.join(file))
++                .count(),
++            1,
++            "{file} should appear once"
++        );
++    }
++    assert_eq!(
++        grants
++            .read_write
++            .iter()
++            .filter(|path| *path == &cargo.join("registry"))
++            .count(),
++        1
++    );
++    assert_eq!(
++        grants
++            .read_write
++            .iter()
++            .filter(|path| *path == &cargo.join("git"))
++            .count(),
++        1
++    );
++}
++
+ #[test]
+ fn absent_toolchain_homes_are_not_granted() {
++    let _env = isolated_toolchain_env();
+     let home = tempfile::tempdir().unwrap();
+     fs::create_dir_all(home.path().join(".nvm")).unwrap();
+     let g = resolve_local_jail_grants(Some(home.path()), &LocalJailConfig::default());
+@@ -132,6 +318,16 @@ fn absent_toolchain_homes_are_not_granted() {
+ fn toolchain_homes_can_be_switched_off() {
+     let home = fake_home();
+     fs::write(home.path().join(".gitconfig"), "[user]\n name = x\n").unwrap();
++    let install = tempfile::tempdir().unwrap();
++    let rustup = install.path().join("rustup-home");
++    let cargo = install.path().join("cargo-home");
++    fs::create_dir_all(&rustup).unwrap();
++    for dir in ["bin", "registry", "git"] {
++        fs::create_dir_all(cargo.join(dir)).unwrap();
++    }
++    let _env = EnvVarGuard::locked()
++        .with("RUSTUP_HOME", &rustup)
++        .with("CARGO_HOME", &cargo);
+     let cfg = LocalJailConfig {
+         toolchain_homes: false,
+         ..LocalJailConfig::default()
+@@ -142,6 +338,7 @@ fn toolchain_homes_can_be_switched_off() {
+ 
+ #[test]
+ fn cargo_home_with_registry_credentials_is_granted_piecewise() {
++    let _env = isolated_toolchain_env();
+     let home = fake_home();
+     let cargo = home.path().join(".cargo");
+     for d in ["bin", "registry", "git"] {
+@@ -168,6 +365,7 @@ fn cargo_home_with_registry_credentials_is_granted_piecewise() {
+ 
+ #[test]
+ fn a_writable_grant_subsumes_the_same_path_read_only() {
++    let _env = isolated_toolchain_env();
+     let home = fake_home();
+     let cfg = LocalJailConfig {
+         extra_read_only: vec!["~/.npm".into()],
+@@ -182,6 +380,7 @@ fn a_writable_grant_subsumes_the_same_path_read_only() {
+ 
+ #[test]
+ fn proc_is_off_by_default_and_only_the_toggle_grants_it() {
++    let _env = isolated_toolchain_env();
+     let home = fake_home();
+     let g = resolve_local_jail_grants(Some(home.path()), &LocalJailConfig::default());
+     assert!(!all(&g).iter().any(|p| p.starts_with("/proc")));
+@@ -205,6 +404,7 @@ fn proc_is_off_by_default_and_only_the_toggle_grants_it() {
+ 
+ #[test]
+ fn extras_expand_tilde_and_skip_missing_paths() {
++    let _env = isolated_toolchain_env();
+     let home = fake_home();
+     fs::create_dir_all(home.path().join("dotfiles")).unwrap();
+     fs::create_dir_all(home.path().join("data")).unwrap();
+@@ -221,6 +421,7 @@ fn extras_expand_tilde_and_skip_missing_paths() {
+ 
+ #[test]
+ fn gitconfig_symlink_and_include_targets_are_canonicalized() {
++    let _env = isolated_toolchain_env();
+     let home = fake_home();
+     let dots = home.path().join("dotfiles");
+     fs::create_dir_all(&dots).unwrap();
+@@ -247,6 +448,7 @@ fn gitconfig_symlink_and_include_targets_are_canonicalized() {
+ 
+ #[test]
+ fn gitconfig_include_cycles_terminate() {
++    let _env = isolated_toolchain_env();
+     let home = fake_home();
+     fs::write(home.path().join(".gitconfig"), "[include]\n path = ~/b\n").unwrap();
+     fs::write(home.path().join("b"), "[include]\n path = ~/.gitconfig\n").unwrap();
+@@ -256,6 +458,7 @@ fn gitconfig_include_cycles_terminate() {
+ 
+ #[test]
+ fn no_home_yields_only_system_toolchain_dirs() {
++    let _env = isolated_toolchain_env();
+     let g = resolve_local_jail_grants(None, &LocalJailConfig::default());
+     assert!(g.read_write.is_empty());
+     assert!(g
 diff --git a/crates/openhuman-core/src/sandbox/ops.rs b/crates/openhuman-core/src/sandbox/ops.rs
 index 84a0d60806a7956b83254da3ffdfa3df21af7478..cd8fe7c7fa0af4b2fdeb50368ef485d56d31bc0e 100644
 --- a/crates/openhuman-core/src/sandbox/ops.rs
@@ -40,7 +400,7 @@ index 84a0d60806a7956b83254da3ffdfa3df21af7478..cd8fe7c7fa0af4b2fdeb50368ef485d5
              cmd.env(var, val);
          }
 diff --git a/crates/openhuman-core/src/sandbox/ops_tests.rs b/crates/openhuman-core/src/sandbox/ops_tests.rs
-index 374ced5cb81f21d5704fd404c1430838ade0bdc5..8661d9f1cd12d1173680b21c1a474a6375d190ad 100644
+index 374ced5cb81f21d5704fd404c1430838ade0bdc5..2e952cd1f76c06556e5065f0aee904a8da592c11 100644
 --- a/crates/openhuman-core/src/sandbox/ops_tests.rs
 +++ b/crates/openhuman-core/src/sandbox/ops_tests.rs
 @@ -50,6 +50,13 @@ fn resolve_sandbox_policy_sandboxed_remote_uses_docker() {
@@ -57,10 +417,30 @@ index 374ced5cb81f21d5704fd404c1430838ade0bdc5..8661d9f1cd12d1173680b21c1a474a63
  }
  
  #[test]
-@@ -350,6 +357,40 @@ async fn run_local(policy: &SandboxPolicy, command: &str) -> SandboxExecResult {
-     .unwrap()
+@@ -500,6 +507,7 @@ fn host_has(program: &str) -> bool {
+ #[cfg(target_os = "linux")]
+ #[tokio::test]
+ async fn landlock_jail_runs_cargo_and_mktemp_but_blocks_writes_outside() {
++    let _env = crate::config::test_env::EnvVarGuard::locked_async().await;
+     if !landlock_in_force() {
+         return;
+     }
+@@ -641,3 +649,7 @@ fn sandbox_off_value_keeps_sandbox_on_otherwise() {
+         assert!(!sandbox_off_value(v), "{v:?} must leave the sandbox on");
+     }
  }
- 
++
++#[cfg(unix)]
++#[path = "ops_toolchain_tests.rs"]
++mod toolchain_homes;
+diff --git a/crates/openhuman-core/src/sandbox/ops_toolchain_tests.rs b/crates/openhuman-core/src/sandbox/ops_toolchain_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..97dd6f2dd03ebf69b17c954136c20ec329c56151
+--- /dev/null
++++ b/crates/openhuman-core/src/sandbox/ops_toolchain_tests.rs
+@@ -0,0 +1,104 @@
++use super::*;
++
 +#[cfg(unix)]
 +#[tokio::test]
 +async fn local_jail_forwards_nonempty_toolchain_homes_without_cargo() {
@@ -95,48 +475,89 @@ index 374ced5cb81f21d5704fd404c1430838ade0bdc5..8661d9f1cd12d1173680b21c1a474a63
 +    );
 +}
 +
- #[cfg(unix)]
- fn entries(dir: &Path) -> Vec<String> {
-     let mut names: Vec<String> = std::fs::read_dir(dir)
-@@ -517,6 +558,26 @@ async fn landlock_jail_runs_cargo_and_mktemp_but_blocks_writes_outside() {
-         let r = run_local(&policy, &format!("{quoted_cargo} --version")).await;
-         assert!(r.success(), "cargo failed under the jail: {}", r.stderr);
-         assert!(r.stdout.starts_with("cargo "), "stdout: {}", r.stdout);
-+
-+        // The fixture uses the host's real toolchain, so compare the sandbox
-+        // values with the environment that selected that toolchain. This avoids
-+        // process-global env mutation and exercises the actual spawn path.
-+        let expected_homes = ["RUSTUP_HOME", "CARGO_HOME"].map(|name| {
-+            std::env::var_os(name)
-+                .map(|value| value.to_string_lossy().into_owned())
-+                .unwrap_or_default()
-+        });
-+        let r = run_local(
-+            &policy,
-+            "printf '%s\\n' \"${RUSTUP_HOME-}\" \"${CARGO_HOME-}\"",
-+        )
-+        .await;
-+        assert!(r.success(), "toolchain home probe failed: {}", r.stderr);
-+        assert_eq!(
-+            r.stdout,
-+            format!("{}\n{}\n", expected_homes[0], expected_homes[1]),
-+            "sandboxed commands must inherit explicitly configured Rust toolchain homes"
-+        );
-     } else {
-         eprintln!("SKIP cargo: build toolchain executable is absent on this host");
-     }
++#[cfg(target_os = "linux")]
++#[tokio::test]
++async fn landlock_custom_toolchain_homes_keep_selective_access() {
++    if !landlock_in_force() {
++        return;
++    }
++    let action = tempfile::tempdir().unwrap();
++    let state = tempfile::tempdir().unwrap();
++    let rustup_home = tempfile::tempdir().unwrap();
++    let cargo_home = tempfile::tempdir().unwrap();
++    for child in ["bin", "registry", "git"] {
++        std::fs::create_dir(cargo_home.path().join(child)).unwrap();
++    }
++    std::fs::write(rustup_home.path().join("toolchain"), "rust-fixture").unwrap();
++    std::fs::write(cargo_home.path().join("bin/tool"), "cargo-fixture").unwrap();
++    std::fs::write(cargo_home.path().join("credentials.toml"), "fixture-secret").unwrap();
++    let _env = crate::config::test_env::EnvVarGuard::locked_async()
++        .await
++        .with("RUSTUP_HOME", rustup_home.path().to_str().unwrap())
++        .with("CARGO_HOME", cargo_home.path().to_str().unwrap());
++    let policy = local_policy(action.path(), state.path());
++    let reads = run_local(
++        &policy,
++        "cat \"$RUSTUP_HOME/toolchain\"; cat \"$CARGO_HOME/bin/tool\"",
++    )
++    .await;
++    assert!(
++        reads.success(),
++        "custom toolchain reads failed: {}",
++        reads.stderr
++    );
++    assert_eq!(reads.stdout, "rust-fixturecargo-fixture");
++    let caches = run_local(
++        &policy,
++        "printf registry > \"$CARGO_HOME/registry/probe\" && printf git > \"$CARGO_HOME/git/probe\"",
++    )
++    .await;
++    assert!(
++        caches.success(),
++        "Cargo cache writes failed: {}",
++        caches.stderr
++    );
++    for command in [
++        "printf denied > \"$RUSTUP_HOME/toolchain\"",
++        "printf denied > \"$CARGO_HOME/bin/tool\"",
++        "cat \"$CARGO_HOME/credentials.toml\"",
++        "printf denied > \"$CARGO_HOME/credentials.toml\"",
++    ] {
++        let result = run_local(&policy, command).await;
++        assert!(!result.success(), "selective access allowed {command}");
++    }
++    assert_eq!(
++        std::fs::read_to_string(rustup_home.path().join("toolchain")).unwrap(),
++        "rust-fixture"
++    );
++    assert_eq!(
++        std::fs::read_to_string(cargo_home.path().join("bin/tool")).unwrap(),
++        "cargo-fixture"
++    );
++    assert_eq!(
++        std::fs::read_to_string(cargo_home.path().join("registry/probe")).unwrap(),
++        "registry"
++    );
++    assert_eq!(
++        std::fs::read_to_string(cargo_home.path().join("git/probe")).unwrap(),
++        "git"
++    );
++}
 diff --git a/docs/RELEASE-MANUAL-SMOKE.md b/docs/RELEASE-MANUAL-SMOKE.md
-index 023788306fe091726b2d4736262e7e47e3d43b5d..3723c4e3f4f03a43a6def48570ea9b954ee8fb2c 100644
+index 023788306fe091726b2d4736262e7e47e3d43b5d..5ab08c2e99cd90955ca676747994d4b8c38d4038 100644
 --- a/docs/RELEASE-MANUAL-SMOKE.md
 +++ b/docs/RELEASE-MANUAL-SMOKE.md
-@@ -130,3 +130,5 @@ Notes:
- ```
+@@ -89,6 +89,8 @@ Applies to every release, all platforms.
+ - [ ] **OS-native notification toasts fire** — Trigger a notification from inside the app (e.g. memory captured, agent finished). Expected: a libnotify-style toast appears outside the app window. (CI Linux sees only Xvfb; this surface verifies on a real desktop.)
+ - [ ] **Headless supervisor update stages without self-exit** — On a Linux service deployment with `[update] restart_strategy = "supervisor"` and `rpc_mutations_enabled = false`, stage a new core binary through the documented operator flow. Expected: the running process stays up until the supervisor restart, the staged binary is present on disk, and `systemctl restart openhuman` (or equivalent) picks up the new version.
  
- Paste the filled block as a commit comment on the `v<version>-staging` tagged commit before promoting to production.
++- [ ] **Native sandbox preserves installed Rust toolchain homes** — In an isolated Linux profile with Rust installed through explicit absolute `RUSTUP_HOME` and `CARGO_HOME` outside the profile HOME and system toolchain roots, run `cargo --version` through the sandboxed shell. Expected: the installed Cargo version is returned, temporary files use the sandbox scratch directory, workspace writes succeed, and a write to a separately prepared outside directory is denied. Verify the configured homes match the values observed inside the native sandbox. Confirm Cargo registry/git cache writes succeed and toolchain files and Cargo credentials retain their access restrictions.
 +
-+- [ ] **Native sandbox preserves installed Rust toolchain homes** — In an isolated Linux profile with Rust installed through explicit `RUSTUP_HOME` and `CARGO_HOME`, run `cargo --version` through the sandboxed shell. Expected: the installed Cargo version is returned, temporary files use the sandbox scratch directory, workspace writes succeed, and a write to a separately prepared outside directory is denied. Verify the configured homes match the values observed inside the native sandbox.
+ ### Cross-platform
+ 
+ - [ ] **Agent files land in a visible folder** — Ask the agent for a short document or deck. Expected: the file appears in `~/OpenHuman/projects/Files` under its title (not in `~/.openhuman`); **Show in folder** in the chat Files panel opens the file manager at it; Settings → Agent OS access → **Files folder** shows that path, **Show in folder** opens it, and choosing another folder sends the next file there while the earlier file still opens. On an upgraded install, files from before the upgrade have moved into the folder.
 diff --git a/docs/TEST-COVERAGE-MATRIX.md b/docs/TEST-COVERAGE-MATRIX.md
-index bde4641cdb2ada3dec5d418a465fb2def0654691..69d84f387036417e1723ad239858c0818763a6fd 100644
+index bde4641cdb2ada3dec5d418a465fb2def0654691..bb2b791bd76d2e284a379f17792925bb4a1c3c67 100644
 --- a/docs/TEST-COVERAGE-MATRIX.md
 +++ b/docs/TEST-COVERAGE-MATRIX.md
 @@ -272,7 +272,7 @@ End-to-end coverage of the agent harness via the web-chat RPC surface against an
@@ -144,12 +565,12 @@ index bde4641cdb2ada3dec5d418a465fb2def0654691..69d84f387036417e1723ad239858c081
  | ID    | Feature                      | Layer | Test path(s)                                                                                                    | Status | Notes                                                                                            |
  | ----- | ---------------------------- | ----- | --------------------------------------------------------------------------------------------------------------- | ------ | ------------------------------------------------------------------------------------------------ |
 -| 6.2.1 | Shell Command Execution      | RU+WD | `crates/openhuman-core/src/tools/impl/system/shell.rs`, `app/test/e2e/specs/tool-shell-git-flow.spec.ts`                    | ✅     | Was 🟡 — WDIO asserts agent runtime + the shell-bearing agent registry contract (the orchestrator since `tools_agent` was removed); full LLM path tracked #68 |
-+| 6.2.1 | Shell Command Execution      | RU+RI+WD | `crates/openhuman-core/src/tools/impl/system/shell.rs`, `crates/openhuman-core/src/sandbox/ops_tests.rs`, `tests/agent_harness_e2e.rs` (`sandboxed_shell_forwards_host_toolchain_homes_and_confines_writes`), `app/test/e2e/specs/tool-shell-git-flow.spec.ts` | ✅     | Was 🟡 — WDIO asserts agent runtime + the shell-bearing agent registry contract (the orchestrator since `tools_agent` was removed); full LLM path tracked #68; Rust toolchain startup is covered through the real Landlock Cargo fixture and an agent-shell RPC/model-loop E2E, including observed host homes, Cargo startup, scratch files, workspace writes and outside-workspace write denial |
++| 6.2.1 | Shell Command Execution      | RU+RI+WD | `crates/openhuman-core/src/tools/impl/system/shell.rs`, `crates/openhuman-core/src/sandbox/ops_tests.rs`, `tests/agent_harness_e2e.rs` (`sandboxed_shell_forwards_host_toolchain_homes_and_confines_writes`), `app/test/e2e/specs/tool-shell-git-flow.spec.ts` | ✅     | Was 🟡 — WDIO asserts agent runtime + the shell-bearing agent registry contract (the orchestrator since `tools_agent` was removed); full LLM path tracked #68; Rust toolchain startup is covered through the real Landlock Cargo fixture and an agent-shell RPC/model-loop E2E, including observed custom homes, Cargo startup, scratch files, workspace writes and outside-workspace write denial; `crates/openhuman-core/src/sandbox/ops_toolchain_tests.rs` (`landlock_custom_toolchain_homes_keep_selective_access`) verifies read-only toolchain files, registry/git cache writes and Cargo credential denial |
  | 6.2.2 | Command Restriction Handling | RU+WD | `crates/openhuman-core/src/security/policy/policy_tests.rs` (+ `policy_injection_tests.rs`), `app/test/e2e/specs/tool-shell-git-flow.spec.ts`                      | ✅     | Was 🟡 — WDIO locks denial envelope shape `{ ok:false, error }` consumed by the React UI         |
  | 6.2.3 | Git Read Operations          | RU+WD | `vendor/tinyagents/vendor/tinytools/crates/tinytools-std/src/filesystem/git_operations/test.rs`, `app/test/e2e/specs/tool-shell-git-flow.spec.ts` | ✅     | Was 🟡 — WDIO seeds a fixture repo in OPENHUMAN_WORKSPACE and asserts read ops succeed           |
  | 6.2.4 | Git Write Operations         | RU+WD | `vendor/tinyagents/vendor/tinytools/crates/tinytools-std/src/filesystem/git_operations/test.rs`, `app/test/e2e/specs/tool-shell-git-flow.spec.ts` | ✅     | Was 🟡 — WDIO commits into the same fixture and asserts log advances                             |
 diff --git a/tests/agent_harness_e2e.rs b/tests/agent_harness_e2e.rs
-index a1b73c7aed990f3993ab71d36cf8dec617ec440b..c661e054f98f52bcb6b3d83662f5dbf1bee17e4a 100644
+index a1b73c7aed990f3993ab71d36cf8dec617ec440b..1594d05a77d98942573394066b79c7ef3fa2cbe5 100644
 --- a/tests/agent_harness_e2e.rs
 +++ b/tests/agent_harness_e2e.rs
 @@ -36,7 +36,9 @@ use serde_json::{json, Value};
@@ -162,7 +583,7 @@ index a1b73c7aed990f3993ab71d36cf8dec617ec440b..c661e054f98f52bcb6b3d83662f5dbf1
  use openhuman_rpc::server::build_core_http_router;
  
  const TEST_RPC_TOKEN: &str = "json-rpc-e2e-local-token";
-@@ -5159,3 +5161,237 @@ async fn a_wrong_tool_guess_is_retried_not_treated_as_an_auth_blocker_inner() {
+@@ -5159,3 +5161,363 @@ async fn a_wrong_tool_guess_is_retried_not_treated_as_an_auth_blocker_inner() {
  
      stack.shutdown();
  }
@@ -191,37 +612,165 @@ index a1b73c7aed990f3993ab71d36cf8dec617ec440b..c661e054f98f52bcb6b3d83662f5dbf1
 +    let host_home = std::env::var_os("HOME")
 +        .map(std::path::PathBuf::from)
 +        .expect("host HOME must be set before the stack fixture replaces it");
-+    let rustup_home = std::env::var_os("RUSTUP_HOME")
++    let host_rustup_home = std::env::var_os("RUSTUP_HOME")
 +        .map(std::path::PathBuf::from)
 +        .unwrap_or_else(|| host_home.join(".rustup"));
-+    let cargo_home = std::env::var_os("CARGO_HOME")
++    let host_cargo_home = std::env::var_os("CARGO_HOME")
 +        .map(std::path::PathBuf::from)
 +        .unwrap_or_else(|| host_home.join(".cargo"));
 +    assert!(
-+        rustup_home.is_absolute(),
++        host_rustup_home.is_absolute(),
 +        "host RUSTUP_HOME must be absolute"
 +    );
-+    assert!(cargo_home.is_absolute(), "host CARGO_HOME must be absolute");
-+    assert!(rustup_home.is_dir(), "host RUSTUP_HOME must exist");
-+    assert!(cargo_home.is_dir(), "host CARGO_HOME must exist");
-+    let cargo_path = std::env::split_paths(
-+        &std::env::var_os("PATH").expect("host PATH must be set before the stack fixture"),
-+    )
-+    .map(|dir| dir.join("cargo"))
-+    .find(|candidate| candidate.is_file())
-+    .expect("cargo must be present on the pinned Linux test PATH");
-+    let cargo_bin = cargo_path
-+        .parent()
-+        .expect("cargo executable must have a parent directory")
++    assert!(
++        host_cargo_home.is_absolute(),
++        "host CARGO_HOME must be absolute"
++    );
++    assert!(host_rustup_home.is_dir(), "host RUSTUP_HOME must exist");
++    assert!(host_cargo_home.is_dir(), "host CARGO_HOME must exist");
++    let host_cargo_path = host_cargo_home.join("bin/cargo");
++    let host_rustup_path = host_cargo_home.join("bin/rustup");
++    assert!(
++        host_cargo_path.is_file(),
++        "host CARGO_HOME must contain the selected Cargo executable"
++    );
++    assert!(
++        host_rustup_path.is_file(),
++        "host CARGO_HOME must contain the Rustup proxy"
++    );
++    let host_settings = std::fs::read_to_string(host_rustup_home.join("settings.toml"))
++        .expect("host Rustup settings must exist");
++    let active_toolchain = host_settings
++        .lines()
++        .find_map(|line| {
++            let (key, value) = line.split_once('=')?;
++            (key.trim() == "default_toolchain").then(|| value.trim().trim_matches('"').to_owned())
++        })
++        .filter(|name| !name.is_empty())
++        .expect("host Rustup settings must select a default toolchain");
++    let host_toolchain_cargo = host_rustup_home
++        .join("toolchains")
++        .join(&active_toolchain)
++        .join("bin/cargo");
++    let host_toolchain_rustc = host_rustup_home
++        .join("toolchains")
++        .join(&active_toolchain)
++        .join("bin/rustc");
++    assert!(
++        host_toolchain_cargo.is_file(),
++        "the selected host toolchain must contain its real Cargo executable"
++    );
++    assert!(
++        host_toolchain_rustc.is_file(),
++        "the selected host toolchain must contain its real rustc executable"
++    );
++    let host_active_toolchain = std::process::Command::new(&host_rustup_path)
++        .args(["show", "active-toolchain"])
++        .current_dir(action_dir.path())
++        .env("RUSTUP_HOME", &host_rustup_home)
++        .env_remove("RUSTUP_TOOLCHAIN")
++        .output()
++        .expect("run host Rustup to verify the captured selection");
++    assert!(
++        host_active_toolchain.status.success(),
++        "host Rustup could not select its default toolchain: {}",
++        String::from_utf8_lossy(&host_active_toolchain.stderr)
++    );
++    let host_active_toolchain = String::from_utf8_lossy(&host_active_toolchain.stdout)
++        .trim()
++        .to_owned();
++    assert!(
++        host_active_toolchain.starts_with(&active_toolchain),
++        "host Rustup selection disagrees with settings.toml: {host_active_toolchain}"
++    );
++    let host_cargo_version = std::process::Command::new(&host_cargo_path)
++        .arg("--version")
++        .current_dir(action_dir.path())
++        .env("RUSTUP_HOME", &host_rustup_home)
++        .env("CARGO_HOME", &host_cargo_home)
++        .env_remove("RUSTUP_TOOLCHAIN")
++        .output()
++        .expect("run host Cargo to capture its version");
++    assert!(
++        host_cargo_version.status.success(),
++        "host Cargo version command failed: {}",
++        String::from_utf8_lossy(&host_cargo_version.stderr)
++    );
++    let host_cargo_version = String::from_utf8_lossy(&host_cargo_version.stdout)
++        .trim()
++        .to_owned();
++    assert!(
++        host_cargo_version.starts_with("cargo "),
++        "host Cargo returned an unexpected version string: {host_cargo_version}"
++    );
++
++    // Stage only real selection metadata and executable files outside HOME
++    // and system roots; the real compiler itself is never built or downloaded.
++    let staged_root = tempdir().expect("external toolchain fixture");
++    let staged_root_path = staged_root
++        .path()
 +        .canonicalize()
-+        .expect("cargo executable directory must exist");
++        .expect("external toolchain fixture path");
++    let canonical_host_home = host_home.canonicalize().expect("host HOME exists");
++    assert!(
++        !staged_root_path.starts_with(&canonical_host_home)
++            && ["/usr/local", "/opt"]
++                .iter()
++                .all(|root| !staged_root_path.starts_with(root)),
++        "custom toolchain fixture must be outside host HOME and existing system grants"
++    );
++    let rustup_home = staged_root.path().join("rustup-home");
++    let cargo_home = staged_root.path().join("cargo-home");
++    let cargo_bin = cargo_home.join("bin");
++    std::fs::create_dir_all(&rustup_home).expect("create external Rustup home");
++    std::fs::create_dir_all(&cargo_bin).expect("create external Cargo bin");
++    std::fs::copy(
++        host_rustup_home.join("settings.toml"),
++        rustup_home.join("settings.toml"),
++    )
++    .expect("copy real Rustup selection metadata");
++    let stage_executable = |source: &Path, destination: std::path::PathBuf| {
++        let source = source
++            .canonicalize()
++            .expect("host toolchain executable must resolve");
++        if std::fs::hard_link(&source, &destination).is_err() {
++            std::fs::copy(&source, &destination).expect("copy real toolchain executable");
++        }
++    };
++    let staged_toolchain_bin = rustup_home
++        .join("toolchains")
++        .join(&active_toolchain)
++        .join("bin");
++    std::fs::create_dir_all(&staged_toolchain_bin)
++        .expect("create staged selected toolchain bin directory");
++    stage_executable(&host_toolchain_cargo, staged_toolchain_bin.join("cargo"));
++    stage_executable(&host_toolchain_rustc, staged_toolchain_bin.join("rustc"));
++    stage_executable(&host_cargo_path, cargo_bin.join("cargo"));
++    stage_executable(&host_rustup_path, cargo_bin.join("rustup"));
++    std::fs::write(
++        cargo_home.join("config.toml"),
++        "[term]\ncolor = \"never\"\n",
++    )
++    .expect("write harmless Cargo config fixture");
++    std::fs::create_dir_all(cargo_home.join("registry")).expect("create Cargo registry cache");
++    std::fs::create_dir_all(cargo_home.join("git")).expect("create Cargo git cache");
++    let cargo_registry_marker = cargo_home.join("registry/agent-shell-write.txt");
++    let cargo_git_marker = cargo_home.join("git/agent-shell-write.txt");
++
++    let cargo_bin = cargo_bin
++        .canonicalize()
++        .expect("custom Cargo bin directory must exist");
 +    let marker_name = format!("agent-harness-shell-{}.txt", std::process::id());
 +    let marker_path = action_dir.path().join(&marker_name);
 +    let outside_path = outside_dir.path().join("must-stay-unwritable.txt");
++    let expected_toolchain = shell_single_quote(&host_active_toolchain);
++    let expected_cargo_version = shell_single_quote(&host_cargo_version);
 +    let command = format!(
-+        "set -eu; export PATH={}:$PATH; printf 'RUSTUP_HOME=%s\\nCARGO_HOME=%s\\n' \"$RUSTUP_HOME\" \"$CARGO_HOME\"; printf 'CARGO_EXE=%s\\n' \"$(command -v cargo)\"; cargo --version; printf 'workspace-write-ok\\n' > '{marker_name}'; test \"$(cat '{marker_name}')\" = workspace-write-ok; printf 'WORKSPACE_WRITE=ok\\n'; if printf 'outside-write\\n' > {}; then printf 'OUTSIDE_WRITE=allowed\\n'; else printf 'OUTSIDE_WRITE=blocked\\n'; fi; scratch=$(mktemp); test -f \"$scratch\"; printf 'MKTEMP=ok\\n'; rm -f \"$scratch\"",
-+        shell_single_quote(&cargo_bin.to_string_lossy()),
-+        shell_single_quote(&outside_path.to_string_lossy())
++        "set -eu; export PATH={cargo_bin}:$PATH; printf 'RUSTUP_HOME=%s\\nCARGO_HOME=%s\\n' \"$RUSTUP_HOME\" \"$CARGO_HOME\"; printf 'CARGO_EXE=%s\\n' \"$(command -v cargo)\"; active_toolchain=$(rustup show active-toolchain); test -n \"$active_toolchain\"; test \"$active_toolchain\" = {expected_toolchain}; printf 'RUSTUP_ACTIVE_TOOLCHAIN=%s\\n' \"$active_toolchain\"; cargo_version=$(cargo --version); test -n \"$cargo_version\"; test \"$cargo_version\" = {expected_cargo_version}; printf 'CARGO_VERSION=%s\\n' \"$cargo_version\"; printf 'cache-write\\n' > \"$CARGO_HOME/registry/agent-shell-write.txt\"; printf 'cache-write\\n' > \"$CARGO_HOME/git/agent-shell-write.txt\"; printf 'CARGO_CACHE_WRITE=ok\\n'; printf 'workspace-write-ok\\n' > '{marker_name}'; test \"$(cat '{marker_name}')\" = workspace-write-ok; printf 'WORKSPACE_WRITE=ok\\n'; if printf 'outside-write\\n' > {outside_path}; then printf 'OUTSIDE_WRITE=allowed\\n'; else printf 'OUTSIDE_WRITE=blocked\\n'; fi; scratch=$(mktemp); test -f \"$scratch\"; printf 'MKTEMP=ok\\n'; rm -f \"$scratch\"",
++        cargo_bin = shell_single_quote(&cargo_bin.to_string_lossy()),
++        expected_toolchain,
++        expected_cargo_version,
++        outside_path = shell_single_quote(&outside_path.to_string_lossy()),
 +    );
 +    reset_script(vec![
 +        tool_call_completion("shell", json!({ "command": command, "category": "write" })),
@@ -233,57 +782,49 @@ index a1b73c7aed990f3993ab71d36cf8dec617ec440b..c661e054f98f52bcb6b3d83662f5dbf1
 +    let _rustup_home_guard = EnvVarGuard::set_to_path("RUSTUP_HOME", &rustup_home);
 +    let _cargo_home_guard = EnvVarGuard::set_to_path("CARGO_HOME", &cargo_home);
 +    let stack = boot_stack().await;
-+    let default_grants = || {
-+        resolve_local_jail_grants(
-+            Some(stack._tmp.path()),
-+            &RuntimeConfig::default().local_jail,
-+        )
++    let fixture_home = stack
++        ._tmp
++        .path()
++        .canonicalize()
++        .expect("private fixture HOME exists");
++    assert!(
++        !staged_root_path.starts_with(&fixture_home),
++        "custom toolchain fixture must be outside private HOME"
++    );
++    let grants = resolve_local_jail_grants(
++        Some(stack._tmp.path()),
++        &RuntimeConfig::default().local_jail,
++    );
++    let is_covered_by = |path: &Path, roots: &[std::path::PathBuf]| {
++        let canonical = path.canonicalize().expect("custom toolchain path exists");
++        roots.iter().any(|grant| canonical.starts_with(grant))
 +    };
-+    let is_covered = |path: &Path| {
-+        let canonical = path.canonicalize().expect("captured toolchain path exists");
-+        let grants = default_grants();
-+        grants
-+            .read_only
-+            .iter()
-+            .chain(&grants.read_write)
-+            .any(|grant| canonical.starts_with(grant))
-+    };
-+    if is_covered(&rustup_home) && is_covered(&cargo_home) && is_covered(&cargo_bin) {
-+        // Pinned CI keeps the real toolchain under /usr/local. The default
-+        // resolver admits those captured paths directly, outside fixture HOME.
-+        assert!(
-+            ["/usr/local", "/opt"].iter().any(|root| {
-+                let root = Path::new(root);
-+                [&rustup_home, &cargo_home, &cargo_bin]
-+                    .iter()
-+                    .all(|path| path.canonicalize().is_ok_and(|p| p.starts_with(root)))
-+            }),
-+            "captured paths use default grants, but are outside the expected system roots"
-+        );
-+    } else {
-+        let canonical_home = host_home.canonicalize().expect("host HOME exists");
-+        let home_rustup = canonical_home.join(".rustup").canonicalize();
-+        let home_cargo = canonical_home.join(".cargo").canonicalize();
-+        let home_cargo_bin = canonical_home.join(".cargo/bin").canonicalize();
-+        assert!(
-+            rustup_home.canonicalize().ok().as_ref() == home_rustup.as_ref().ok()
-+                && cargo_home.canonicalize().ok().as_ref() == home_cargo.as_ref().ok()
-+                && cargo_bin.canonicalize().ok().as_ref() == home_cargo_bin.as_ref().ok(),
-+            "captured homes outside default system grants must use conventional HOME/.rustup and HOME/.cargo/bin; custom external homes require an explicit policy decision"
-+        );
-+        // The fixture grants only the canonical default HOME locations; keep
-+        // Cargo credentials outside the linked tree.
-+        std::os::unix::fs::symlink(&rustup_home, stack._tmp.path().join(".rustup"))
-+            .expect("link conventional host Rust home into temporary HOME");
-+        let fixture_cargo_home = stack._tmp.path().join(".cargo");
-+        std::fs::create_dir_all(&fixture_cargo_home).expect("create temporary Cargo home");
-+        std::os::unix::fs::symlink(&cargo_bin, fixture_cargo_home.join("bin"))
-+            .expect("link conventional host Cargo bin into temporary HOME");
-+        assert!(
-+            is_covered(&rustup_home) && is_covered(&cargo_bin),
-+            "canonicalized conventional HOME aliases must be admitted by default grants"
-+        );
-+    }
++    assert!(
++        is_covered_by(&rustup_home, &grants.read_only),
++        "explicit custom RUSTUP_HOME must be read-only admitted"
++    );
++    assert!(
++        is_covered_by(&cargo_bin, &grants.read_only),
++        "explicit custom CARGO_HOME/bin must be read-only admitted"
++    );
++    assert!(
++        is_covered_by(&cargo_home.join("config.toml"), &grants.read_only),
++        "explicit custom Cargo config must be read-only admitted"
++    );
++    assert!(
++        is_covered_by(&cargo_home.join("registry"), &grants.read_write)
++            && is_covered_by(&cargo_home.join("git"), &grants.read_write),
++        "explicit custom Cargo caches must be read-write admitted"
++    );
++    assert!(
++        !is_covered_by(&cargo_home, &grants.read_only)
++            && !is_covered_by(&cargo_home, &grants.read_write),
++        "Cargo home root must retain selective child grants"
++    );
++    assert!(
++        !stack._tmp.path().join(".rustup").exists() && !stack._tmp.path().join(".cargo").exists(),
++        "custom homes must be admitted directly without private-HOME aliases"
++    );
 +    let mut events = spawn_sse_collector(format!(
 +        "{}/events?client_id=harness-sandboxed-shell",
 +        stack.rpc_base
@@ -315,6 +856,10 @@ index a1b73c7aed990f3993ab71d36cf8dec617ec440b..c661e054f98f52bcb6b3d83662f5dbf1
 +        "shell command should succeed: {shell_result}"
 +    );
 +    assert!(marker_path.is_file(), "workspace write did not persist");
++    assert!(
++        cargo_registry_marker.is_file() && cargo_git_marker.is_file(),
++        "the custom Cargo cache grants did not permit shell writes"
++    );
 +    assert!(
 +        !outside_path.exists(),
 +        "the local jail allowed a write outside action_dir: {}",
@@ -390,7 +935,9 @@ index a1b73c7aed990f3993ab71d36cf8dec617ec440b..c661e054f98f52bcb6b3d83662f5dbf1
 +    result.contains(format!("RUSTUP_HOME={}", rustup_home.display()).as_str())
 +        && result.contains(format!("CARGO_HOME={}", cargo_home.display()).as_str())
 +        && result.contains(format!("CARGO_EXE={}", cargo_bin.join("cargo").display()).as_str())
++        && result.contains("RUSTUP_ACTIVE_TOOLCHAIN=")
 +        && result.contains("cargo ")
++        && result.contains("CARGO_CACHE_WRITE=ok")
 +        && result.contains("WORKSPACE_WRITE=ok")
 +        && result.contains("OUTSIDE_WRITE=blocked")
 +        && result.contains("MKTEMP=ok")
