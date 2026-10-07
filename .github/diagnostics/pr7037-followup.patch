@@ -1,8 +1,18 @@
 diff --git a/crates/openhuman-core/src/sandbox/grants.rs b/crates/openhuman-core/src/sandbox/grants.rs
-index 7aaecac3978efbb4d546b72618470b7a3a62397d..d0c3748656fa771ce9e1de1354ab7a45840b0e4b 100644
+index 7aaecac3978efbb4d546b72618470b7a3a62397d..580d3af9b34576dc0d60721eb29b2db32a22e95b 100644
 --- a/crates/openhuman-core/src/sandbox/grants.rs
 +++ b/crates/openhuman-core/src/sandbox/grants.rs
-@@ -56,6 +56,7 @@ pub fn resolve_local_jail_grants(home: Option<&Path>, cfg: &LocalJailConfig) ->
+@@ -30,6 +30,9 @@ const HOME_READ_ONLY_DIRS: &[&str] = &[".rustup", ".nvm", ".npm"];
+ /// holds registry credentials and so cannot be granted whole.
+ const CARGO_READ_ONLY_FILES: &[&str] = &["config.toml", "config", "env"];
+ 
++/// Cargo credential locations excluded by the selective Cargo-home helper.
++const CARGO_CREDENTIAL_PATHS: &[&str] = &["credentials", "credentials.toml"];
++
+ /// Git config files read at startup, relative to `$HOME`.
+ const GITCONFIG_FILES: &[&str] = &[".gitconfig", ".config/git/config", ".config/git/ignore"];
+ 
+@@ -56,6 +59,7 @@ pub fn resolve_local_jail_grants(home: Option<&Path>, cfg: &LocalJailConfig) ->
                  b.read_only(&h.join(dir), "toolchain");
              }
          }
@@ -10,11 +20,69 @@ index 7aaecac3978efbb4d546b72618470b7a3a62397d..d0c3748656fa771ce9e1de1354ab7a45
          for dir in SYSTEM_TOOLCHAIN_DIRS {
              b.read_only(Path::new(dir), "toolchain");
          }
-@@ -167,14 +168,33 @@ impl<'a> Builder<'a> {
+@@ -167,19 +171,133 @@ impl<'a> Builder<'a> {
          }
      }
  
 -    /// Grant only the parts of `~/.cargo` that jailed Cargo needs. The root is
++    /// Known Cargo roots, including their canonical targets when available.
++    /// This is intentionally local to Rust-home grants: system and explicit
++    /// extra grants retain their existing policy.
++    fn cargo_roots(&self) -> Vec<PathBuf> {
++        let mut roots = Vec::new();
++        if let Some(home) = self.home {
++            roots.push(home.join(".cargo"));
++        }
++        if let Ok(raw) = std::env::var("CARGO_HOME") {
++            let configured = PathBuf::from(raw);
++            if configured.is_absolute() {
++                roots.push(configured);
++            }
++        }
++        let mut normalized = Vec::new();
++        for root in roots {
++            let root = root.canonicalize().unwrap_or(root);
++            if !normalized.contains(&root) {
++                normalized.push(root);
++            }
++        }
++        normalized
++    }
++
++    /// Cargo's piecewise grants may include children of Cargo roots, but may
++    /// not collapse through a symlink onto a root or credentials. A custom
++    /// Rustup root is broader and therefore may overlap neither.
++    fn cargo_grant_overlaps(
++        candidate: &Path,
++        roots: &[PathBuf],
++        strict_root: bool,
++        writable: bool,
++    ) -> bool {
++        roots.iter().any(|root| {
++            (candidate == root || root.starts_with(candidate))
++                || (strict_root && candidate.starts_with(root))
++        }) || roots.iter().any(|root| {
++            CARGO_CREDENTIAL_PATHS.iter().any(|name| {
++                let credential = root.join(name);
++                let credential = credential.canonicalize().unwrap_or(credential);
++                candidate == credential
++                    || candidate.starts_with(&credential)
++                    || credential.starts_with(candidate)
++            })
++        }) || (writable
++            && roots.iter().any(|root| {
++                std::iter::once("bin")
++                    .chain(CARGO_READ_ONLY_FILES.iter().copied())
++                    .any(|name| {
++                        let protected = root.join(name);
++                        let protected = protected.canonicalize().unwrap_or(protected);
++                        candidate == protected
++                            || candidate.starts_with(&protected)
++                            || protected.starts_with(candidate)
++                    })
++            }))
++    }
++
 +    /// Admit explicitly selected host Rust homes when the built-in toolchain
 +    /// grants are enabled. Match `ops`' Unicode environment-value semantics;
 +    /// jail admission additionally requires absolute paths to existing dirs.
@@ -22,7 +90,11 @@ index 7aaecac3978efbb4d546b72618470b7a3a62397d..d0c3748656fa771ce9e1de1354ab7a45
 +        if let Ok(raw) = std::env::var("RUSTUP_HOME") {
 +            let rustup = PathBuf::from(raw);
 +            if rustup.is_absolute() && rustup.is_dir() {
-+                self.read_only(&rustup, "RUSTUP_HOME");
++                if let Some(path) = self.admit(&rustup, "RUSTUP_HOME") {
++                    if !Self::cargo_grant_overlaps(&path, &self.cargo_roots(), true, false) {
++                        self.record_read_only(path);
++                    }
++                }
 +            }
 +        }
 +
@@ -38,16 +110,58 @@ index 7aaecac3978efbb4d546b72618470b7a3a62397d..d0c3748656fa771ce9e1de1354ab7a45
      /// never writable: `bin` and Cargo configuration run later outside the
      /// jail, so writable access there would persist an escape for host tools.
      fn add_cargo_home(&mut self, cargo: &Path) {
++        let Ok(cargo) = cargo.canonicalize() else {
++            return;
++        };
          if !cargo.is_dir() {
              return;
          }
 -        tracing::debug!("[sandbox:grants] granting ~/.cargo parts with host code read-only");
+-        self.read_only(&cargo.join("bin"), "toolchain");
+-        self.read_write(&cargo.join("registry"), "toolchain");
+-        self.read_write(&cargo.join("git"), "toolchain");
 +        tracing::debug!("[sandbox:grants] granting Cargo home parts with host code read-only");
-         self.read_only(&cargo.join("bin"), "toolchain");
-         self.read_write(&cargo.join("registry"), "toolchain");
-         self.read_write(&cargo.join("git"), "toolchain");
++        self.cargo_read_only(&cargo.join("bin"), "toolchain");
++        self.cargo_read_write(&cargo.join("registry"), "toolchain");
++        self.cargo_read_write(&cargo.join("git"), "toolchain");
+         for f in CARGO_READ_ONLY_FILES {
+-            self.read_only(&cargo.join(f), "toolchain");
++            self.cargo_read_only(&cargo.join(f), "toolchain");
++        }
++    }
++
++    fn cargo_read_only(&mut self, path: &Path, source: &str) {
++        if let Some(path) = self.admit(path, source) {
++            if !Self::cargo_grant_overlaps(&path, &self.cargo_roots(), false, false) {
++                self.record_read_only(path);
++            }
++        }
++    }
++
++    fn cargo_read_write(&mut self, path: &Path, source: &str) {
++        if let Some(path) = self.admit(path, source) {
++            if !Self::cargo_grant_overlaps(&path, &self.cargo_roots(), false, true) {
++                self.record_read_write(path);
++            }
++        }
++    }
++
++    fn record_read_only(&mut self, path: PathBuf) {
++        if self.seen.insert(path.clone()) {
++            self.grants.read_only.push(path);
++        }
++    }
++
++    fn record_read_write(&mut self, path: PathBuf) {
++        self.grants.read_only.retain(|grant| grant != &path);
++        self.seen.insert(path.clone());
++        if !self.grants.read_write.contains(&path) {
++            self.grants.read_write.push(path);
+         }
+     }
+ 
 diff --git a/crates/openhuman-core/src/sandbox/grants_tests.rs b/crates/openhuman-core/src/sandbox/grants_tests.rs
-index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..77001f6b85bd8b9191bb33164fd9709b5508af7c 100644
+index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..2256b5f1f3397a2d51020bb3accd0fb86208a9c8 100644
 --- a/crates/openhuman-core/src/sandbox/grants_tests.rs
 +++ b/crates/openhuman-core/src/sandbox/grants_tests.rs
 @@ -1,4 +1,5 @@
@@ -101,7 +215,7 @@ index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..77001f6b85bd8b9191bb33164fd9709b
      let home = fake_home();
      let cargo = home.path().join(".cargo");
      for dir in ["bin", "registry", "git"] {
-@@ -117,8 +128,183 @@ fn toolchain_homes_are_granted_when_they_exist() {
+@@ -117,8 +128,228 @@ fn toolchain_homes_are_granted_when_they_exist() {
      }
  }
  
@@ -142,6 +256,51 @@ index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..77001f6b85bd8b9191bb33164fd9709b
 +        .iter()
 +        .any(|path| path == &cargo.join("credentials.toml")));
 +    assert_eq!(reaches_credentials(&all(&grants), home.path()), None);
++}
++
++#[cfg(unix)]
++#[test]
++fn cargo_symlink_aliases_cannot_reach_root_or_credentials() {
++    let home = fake_home();
++    let install = tempfile::tempdir().unwrap();
++    let cargo = install.path().join("cargo-home");
++    let cache = install.path().join("dedicated-cache");
++    fs::create_dir_all(cargo.join("bin")).unwrap();
++    fs::create_dir_all(&cache).unwrap();
++    fs::write(cargo.join("credentials.toml"), "token = \"secret\"\n").unwrap();
++    std::os::unix::fs::symlink(&cargo, cargo.join("registry")).unwrap();
++    std::os::unix::fs::symlink(cargo.join("credentials.toml"), cargo.join("config.toml")).unwrap();
++    std::os::unix::fs::symlink(&cache, cargo.join("git")).unwrap();
++
++    // The parent also contains Cargo credentials, so a broad explicit
++    // RUSTUP_HOME grant must be refused while the narrow cache remains usable.
++    let _env = EnvVarGuard::locked()
++        .with("RUSTUP_HOME", install.path())
++        .with("CARGO_HOME", &cargo);
++    let grants = resolve_local_jail_grants(Some(home.path()), &LocalJailConfig::default());
++    let cargo = canon(&cargo);
++    let cache = canon(&cache);
++    let credential = canon(&cargo.join("credentials.toml"));
++
++    assert!(!has(&grants.read_write, &cargo));
++    assert!(!has(&grants.read_only, install.path()));
++    assert!(!all(&grants)
++        .iter()
++        .any(|path| path == &credential || path.starts_with(&credential)));
++    assert!(has(&grants.read_only, &cargo.join("bin")));
++    assert!(has(&grants.read_write, &cache));
++
++    drop(_env);
++    let mode_cargo = install.path().join("mode-cargo-home");
++    fs::create_dir_all(mode_cargo.join("bin")).unwrap();
++    std::os::unix::fs::symlink(mode_cargo.join("bin"), mode_cargo.join("registry")).unwrap();
++    let _env = EnvVarGuard::locked()
++        .without("RUSTUP_HOME")
++        .with("CARGO_HOME", &mode_cargo);
++    let grants = resolve_local_jail_grants(Some(home.path()), &LocalJailConfig::default());
++    let bin = canon(&mode_cargo.join("bin"));
++    assert!(has(&grants.read_only, &bin));
++    assert!(!has(&grants.read_write, &bin));
 +}
 +
 +#[test]
@@ -285,7 +444,7 @@ index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..77001f6b85bd8b9191bb33164fd9709b
      let home = tempfile::tempdir().unwrap();
      fs::create_dir_all(home.path().join(".nvm")).unwrap();
      let g = resolve_local_jail_grants(Some(home.path()), &LocalJailConfig::default());
-@@ -132,6 +318,16 @@ fn absent_toolchain_homes_are_not_granted() {
+@@ -132,6 +363,16 @@ fn absent_toolchain_homes_are_not_granted() {
  fn toolchain_homes_can_be_switched_off() {
      let home = fake_home();
      fs::write(home.path().join(".gitconfig"), "[user]\n name = x\n").unwrap();
@@ -302,7 +461,7 @@ index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..77001f6b85bd8b9191bb33164fd9709b
      let cfg = LocalJailConfig {
          toolchain_homes: false,
          ..LocalJailConfig::default()
-@@ -142,6 +338,7 @@ fn toolchain_homes_can_be_switched_off() {
+@@ -142,6 +383,7 @@ fn toolchain_homes_can_be_switched_off() {
  
  #[test]
  fn cargo_home_with_registry_credentials_is_granted_piecewise() {
@@ -310,7 +469,7 @@ index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..77001f6b85bd8b9191bb33164fd9709b
      let home = fake_home();
      let cargo = home.path().join(".cargo");
      for d in ["bin", "registry", "git"] {
-@@ -168,6 +365,7 @@ fn cargo_home_with_registry_credentials_is_granted_piecewise() {
+@@ -168,6 +410,7 @@ fn cargo_home_with_registry_credentials_is_granted_piecewise() {
  
  #[test]
  fn a_writable_grant_subsumes_the_same_path_read_only() {
@@ -318,7 +477,7 @@ index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..77001f6b85bd8b9191bb33164fd9709b
      let home = fake_home();
      let cfg = LocalJailConfig {
          extra_read_only: vec!["~/.npm".into()],
-@@ -182,6 +380,7 @@ fn a_writable_grant_subsumes_the_same_path_read_only() {
+@@ -182,6 +425,7 @@ fn a_writable_grant_subsumes_the_same_path_read_only() {
  
  #[test]
  fn proc_is_off_by_default_and_only_the_toggle_grants_it() {
@@ -326,7 +485,7 @@ index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..77001f6b85bd8b9191bb33164fd9709b
      let home = fake_home();
      let g = resolve_local_jail_grants(Some(home.path()), &LocalJailConfig::default());
      assert!(!all(&g).iter().any(|p| p.starts_with("/proc")));
-@@ -205,6 +404,7 @@ fn proc_is_off_by_default_and_only_the_toggle_grants_it() {
+@@ -205,6 +449,7 @@ fn proc_is_off_by_default_and_only_the_toggle_grants_it() {
  
  #[test]
  fn extras_expand_tilde_and_skip_missing_paths() {
@@ -334,7 +493,7 @@ index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..77001f6b85bd8b9191bb33164fd9709b
      let home = fake_home();
      fs::create_dir_all(home.path().join("dotfiles")).unwrap();
      fs::create_dir_all(home.path().join("data")).unwrap();
-@@ -221,6 +421,7 @@ fn extras_expand_tilde_and_skip_missing_paths() {
+@@ -221,6 +466,7 @@ fn extras_expand_tilde_and_skip_missing_paths() {
  
  #[test]
  fn gitconfig_symlink_and_include_targets_are_canonicalized() {
@@ -342,7 +501,7 @@ index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..77001f6b85bd8b9191bb33164fd9709b
      let home = fake_home();
      let dots = home.path().join("dotfiles");
      fs::create_dir_all(&dots).unwrap();
-@@ -247,6 +448,7 @@ fn gitconfig_symlink_and_include_targets_are_canonicalized() {
+@@ -247,6 +493,7 @@ fn gitconfig_symlink_and_include_targets_are_canonicalized() {
  
  #[test]
  fn gitconfig_include_cycles_terminate() {
@@ -350,7 +509,7 @@ index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..77001f6b85bd8b9191bb33164fd9709b
      let home = fake_home();
      fs::write(home.path().join(".gitconfig"), "[include]\n path = ~/b\n").unwrap();
      fs::write(home.path().join("b"), "[include]\n path = ~/.gitconfig\n").unwrap();
-@@ -256,6 +458,7 @@ fn gitconfig_include_cycles_terminate() {
+@@ -256,6 +503,7 @@ fn gitconfig_include_cycles_terminate() {
  
  #[test]
  fn no_home_yields_only_system_toolchain_dirs() {
@@ -570,7 +729,7 @@ index bde4641cdb2ada3dec5d418a465fb2def0654691..bb2b791bd76d2e284a379f17792925bb
  | 6.2.3 | Git Read Operations          | RU+WD | `vendor/tinyagents/vendor/tinytools/crates/tinytools-std/src/filesystem/git_operations/test.rs`, `app/test/e2e/specs/tool-shell-git-flow.spec.ts` | ✅     | Was 🟡 — WDIO seeds a fixture repo in OPENHUMAN_WORKSPACE and asserts read ops succeed           |
  | 6.2.4 | Git Write Operations         | RU+WD | `vendor/tinyagents/vendor/tinytools/crates/tinytools-std/src/filesystem/git_operations/test.rs`, `app/test/e2e/specs/tool-shell-git-flow.spec.ts` | ✅     | Was 🟡 — WDIO commits into the same fixture and asserts log advances                             |
 diff --git a/tests/agent_harness_e2e.rs b/tests/agent_harness_e2e.rs
-index a1b73c7aed990f3993ab71d36cf8dec617ec440b..4763ea6cbb94144e90b4d3d805b9dc7ae49acc25 100644
+index a1b73c7aed990f3993ab71d36cf8dec617ec440b..01a7bd84341198e010a3ade872b4667e3a3adc38 100644
 --- a/tests/agent_harness_e2e.rs
 +++ b/tests/agent_harness_e2e.rs
 @@ -36,7 +36,9 @@ use serde_json::{json, Value};
@@ -583,7 +742,7 @@ index a1b73c7aed990f3993ab71d36cf8dec617ec440b..4763ea6cbb94144e90b4d3d805b9dc7a
  use openhuman_rpc::server::build_core_http_router;
  
  const TEST_RPC_TOKEN: &str = "json-rpc-e2e-local-token";
-@@ -5159,3 +5161,383 @@ async fn a_wrong_tool_guess_is_retried_not_treated_as_an_auth_blocker_inner() {
+@@ -5159,3 +5161,416 @@ async fn a_wrong_tool_guess_is_retried_not_treated_as_an_auth_blocker_inner() {
  
      stack.shutdown();
  }
@@ -605,19 +764,64 @@ index a1b73c7aed990f3993ab71d36cf8dec617ec440b..4763ea6cbb94144e90b4d3d805b9dc7a
 +    let _lock = env_lock();
 +
 +    // Give this real orchestrator turn a private action directory and make the
-+    // host sandbox switch explicit. HOME is separately replaced by the stack
-+    // fixture, so these guards pin the actual host Rust toolchain locations.
++    // host sandbox switch explicit. Capture host toolchain inputs before the
++    // stack fixture replaces HOME, then stage their real executables externally.
 +    let action_dir = tempdir().expect("action directory");
 +    let outside_dir = tempdir().expect("outside directory");
-+    let host_home = std::env::var_os("HOME")
-+        .map(std::path::PathBuf::from)
-+        .expect("host HOME must be set before the stack fixture replaces it");
++    let github_actions = std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true");
++    let host_home = std::env::var_os("HOME").map(std::path::PathBuf::from);
++    let host_path = std::env::var_os("PATH");
++    let find_host_tool = |name: &str| {
++        host_path.as_ref().and_then(|path| {
++            std::env::split_paths(path)
++                .map(|dir| dir.join(name))
++                .find(|candidate| candidate.is_file())
++        })
++    };
++    let host_cargo_path = find_host_tool("cargo");
++    let host_rustup_path = find_host_tool("rustup");
 +    let host_rustup_home = std::env::var_os("RUSTUP_HOME")
 +        .map(std::path::PathBuf::from)
-+        .unwrap_or_else(|| host_home.join(".rustup"));
++        .or_else(|| host_home.as_ref().map(|home| home.join(".rustup")));
 +    let host_cargo_home = std::env::var_os("CARGO_HOME")
 +        .map(std::path::PathBuf::from)
-+        .unwrap_or_else(|| host_home.join(".cargo"));
++        .or_else(|| host_home.as_ref().map(|home| home.join(".cargo")));
++    let mut missing_prerequisites = Vec::new();
++    if host_home.is_none() {
++        missing_prerequisites.push("HOME is unset".to_owned());
++    }
++    if host_cargo_path.is_none() {
++        missing_prerequisites.push("no cargo executable is present on PATH".to_owned());
++    }
++    if host_rustup_path.is_none() {
++        missing_prerequisites.push("no rustup executable is present on PATH".to_owned());
++    }
++    if !host_rustup_home
++        .as_ref()
++        .is_some_and(|home| home.join("settings.toml").is_file())
++    {
++        missing_prerequisites
++            .push("Rustup settings.toml is absent from the selected RUSTUP_HOME".to_owned());
++    }
++    if !missing_prerequisites.is_empty() {
++        let reason = missing_prerequisites.join("; ");
++        if github_actions {
++            panic!("pinned GitHub Actions agent-shell E2E requires initialized Rustup/Cargo prerequisites: {reason}");
++        }
++        eprintln!("SKIP: agent-shell custom toolchain fixture prerequisites unavailable: {reason}");
++        return;
++    }
++    let host_home = host_home.expect("prerequisite check established host HOME");
++    let host_rustup_home = host_rustup_home.expect("prerequisite check established Rustup home");
++    let host_cargo_home = host_cargo_home.expect("HOME or CARGO_HOME is required");
++    let host_cargo_path = host_cargo_path
++        .expect("prerequisite check found Cargo on PATH")
++        .canonicalize()
++        .expect("host Cargo executable must resolve");
++    let host_rustup_path = host_rustup_path
++        .expect("prerequisite check found Rustup on PATH")
++        .canonicalize()
++        .expect("host Rustup executable must resolve");
 +    assert!(
 +        host_rustup_home.is_absolute(),
 +        "host RUSTUP_HOME must be absolute"
@@ -625,18 +829,6 @@ index a1b73c7aed990f3993ab71d36cf8dec617ec440b..4763ea6cbb94144e90b4d3d805b9dc7a
 +    assert!(
 +        host_cargo_home.is_absolute(),
 +        "host CARGO_HOME must be absolute"
-+    );
-+    assert!(host_rustup_home.is_dir(), "host RUSTUP_HOME must exist");
-+    assert!(host_cargo_home.is_dir(), "host CARGO_HOME must exist");
-+    let host_cargo_path = host_cargo_home.join("bin/cargo");
-+    let host_rustup_path = host_cargo_home.join("bin/rustup");
-+    assert!(
-+        host_cargo_path.is_file(),
-+        "host CARGO_HOME must contain the selected Cargo executable"
-+    );
-+    assert!(
-+        host_rustup_path.is_file(),
-+        "host CARGO_HOME must contain the Rustup proxy"
 +    );
 +    let host_settings = std::fs::read_to_string(host_rustup_home.join("settings.toml"))
 +        .expect("host Rustup settings must exist");
