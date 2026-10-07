@@ -1,0 +1,5 @@
+f9dfb1b1589b9f2d3d7f64312f065adb2c2fa891e4e56c14daa0673c58a855a2  crates/openhuman-core/src/sandbox/ops.rs
+b1c718cde89f1a429a116a66962fe0789ddb3fe0dc26d1e2a7a987bb09e71a9b  crates/openhuman-core/src/sandbox/ops_tests.rs
+9202a956e7e3e9fe2184f9e55793f40da0798c92d7d446d3c561e80508a70a8a  docs/RELEASE-MANUAL-SMOKE.md
+0cbb4bf387bdf7ec83925c7e20488d609d3cc7968437922bc3407f9f5774fd70  docs/TEST-COVERAGE-MATRIX.md
+512aca6a36093e762a8038030cf053780743c454eee2643dcd535ee972f667e1  tests/agent_harness_e2e.rs
