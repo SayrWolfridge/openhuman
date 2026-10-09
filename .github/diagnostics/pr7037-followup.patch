@@ -1,5 +1,5 @@
 diff --git a/crates/openhuman-core/src/sandbox/grants.rs b/crates/openhuman-core/src/sandbox/grants.rs
-index 7aaecac3978efbb4d546b72618470b7a3a62397d..56ad2b960d623487900f8611db05c778b16fc994 100644
+index 7aaecac3978efbb4d546b72618470b7a3a62397d..d9a8b7eec9739f830a3a49bd985c98c7075a7672 100644
 --- a/crates/openhuman-core/src/sandbox/grants.rs
 +++ b/crates/openhuman-core/src/sandbox/grants.rs
 @@ -30,6 +30,9 @@ const HOME_READ_ONLY_DIRS: &[&str] = &[".rustup", ".nvm", ".npm"];
@@ -33,7 +33,7 @@ index 7aaecac3978efbb4d546b72618470b7a3a62397d..56ad2b960d623487900f8611db05c778
 +        if let Some(home) = self.home {
 +            roots.push(home.join(".cargo"));
 +        }
-+        if let Ok(raw) = std::env::var("CARGO_HOME") {
++        if let Some(raw) = std::env::var_os("CARGO_HOME") {
 +            let configured = PathBuf::from(raw);
 +            if configured.is_absolute() {
 +                roots.push(configured);
@@ -54,7 +54,7 @@ index 7aaecac3978efbb4d546b72618470b7a3a62397d..56ad2b960d623487900f8611db05c778
 +        if let Some(home) = self.home {
 +            roots.push(home.join(".rustup"));
 +        }
-+        if let Ok(raw) = std::env::var("RUSTUP_HOME") {
++        if let Some(raw) = std::env::var_os("RUSTUP_HOME") {
 +            let configured = PathBuf::from(raw);
 +            if configured.is_absolute() {
 +                roots.push(configured);
@@ -105,10 +105,10 @@ index 7aaecac3978efbb4d546b72618470b7a3a62397d..56ad2b960d623487900f8611db05c778
 +    }
 +
 +    /// Admit explicitly selected host Rust homes when the built-in toolchain
-+    /// grants are enabled. Match `ops`' Unicode environment-value semantics;
-+    /// jail admission additionally requires absolute paths to existing dirs.
++    /// grants are enabled. Preserve OS-string paths like the native spawn
++    /// builders; jail admission additionally requires absolute existing dirs.
 +    fn add_host_toolchain_homes(&mut self) {
-+        if let Ok(raw) = std::env::var("RUSTUP_HOME") {
++        if let Some(raw) = std::env::var_os("RUSTUP_HOME") {
 +            let rustup = PathBuf::from(raw);
 +            if rustup.is_absolute() && rustup.is_dir() {
 +                if let Some(path) = self.admit(&rustup, "RUSTUP_HOME") {
@@ -119,7 +119,7 @@ index 7aaecac3978efbb4d546b72618470b7a3a62397d..56ad2b960d623487900f8611db05c778
 +            }
 +        }
 +
-+        if let Ok(raw) = std::env::var("CARGO_HOME") {
++        if let Some(raw) = std::env::var_os("CARGO_HOME") {
 +            let cargo = PathBuf::from(raw);
 +            if cargo.is_absolute() {
 +                self.add_cargo_home(&cargo);
@@ -197,16 +197,31 @@ index 7aaecac3978efbb4d546b72618470b7a3a62397d..56ad2b960d623487900f8611db05c778
      }
  
 diff --git a/crates/openhuman-core/src/sandbox/grants_tests.rs b/crates/openhuman-core/src/sandbox/grants_tests.rs
-index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..16a7d9c3fac542cfe99f04ec7110de51b781be85 100644
+index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..3757396204dd5e05cbd5c50bc41d7e818130e59f 100644
 --- a/crates/openhuman-core/src/sandbox/grants_tests.rs
 +++ b/crates/openhuman-core/src/sandbox/grants_tests.rs
-@@ -1,4 +1,5 @@
+@@ -1,5 +1,8 @@
  use super::*;
 +use crate::config::test_env::EnvVarGuard;
  use std::fs;
++#[cfg(unix)]
++use std::os::unix::ffi::OsStringExt;
  use std::path::{Path, PathBuf};
  
-@@ -24,6 +25,12 @@ fn all(g: &JailGrants) -> Vec<PathBuf> {
+ fn fake_home() -> tempfile::TempDir {
+@@ -16,6 +19,11 @@ fn canon(p: &Path) -> PathBuf {
+     p.canonicalize().unwrap()
+ }
+ 
++#[cfg(unix)]
++fn non_utf8_child(parent: &Path, name: &[u8]) -> PathBuf {
++    parent.join(std::ffi::OsString::from_vec(name.to_vec()))
++}
++
+ fn has(grants: &[PathBuf], p: &Path) -> bool {
+     grants.iter().any(|g| g == p)
+ }
+@@ -24,6 +32,12 @@ fn all(g: &JailGrants) -> Vec<PathBuf> {
      g.read_only.iter().chain(&g.read_write).cloned().collect()
  }
  
@@ -219,7 +234,7 @@ index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..16a7d9c3fac542cfe99f04ec7110de51
  /// A grant reaches a credential store if it IS one, is inside one, or contains
  /// one (Landlock grants are recursive, so a parent grant exposes the child).
  fn reaches_credentials(grants: &[PathBuf], home: &Path) -> Option<PathBuf> {
-@@ -40,6 +47,7 @@ fn reaches_credentials(grants: &[PathBuf], home: &Path) -> Option<PathBuf> {
+@@ -40,6 +54,7 @@ fn reaches_credentials(grants: &[PathBuf], home: &Path) -> Option<PathBuf> {
  
  #[test]
  fn credential_dirs_are_never_granted_by_default() {
@@ -227,7 +242,7 @@ index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..16a7d9c3fac542cfe99f04ec7110de51
      let home = fake_home();
      let g = resolve_local_jail_grants(Some(home.path()), &LocalJailConfig::default());
      assert_eq!(reaches_credentials(&all(&g), home.path()), None);
-@@ -47,6 +55,7 @@ fn credential_dirs_are_never_granted_by_default() {
+@@ -47,6 +62,7 @@ fn credential_dirs_are_never_granted_by_default() {
  
  #[test]
  fn credential_dirs_are_never_granted_even_when_extras_ask() {
@@ -235,7 +250,7 @@ index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..16a7d9c3fac542cfe99f04ec7110de51
      let home = fake_home();
      let cfg = LocalJailConfig {
          extra_read_only: vec![
-@@ -67,6 +76,7 @@ fn credential_dirs_are_never_granted_even_when_extras_ask() {
+@@ -67,6 +83,7 @@ fn credential_dirs_are_never_granted_even_when_extras_ask() {
  
  #[test]
  fn credential_floor_holds_for_a_symlink_into_a_credential_dir() {
@@ -243,7 +258,7 @@ index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..16a7d9c3fac542cfe99f04ec7110de51
      let home = fake_home();
      std::os::unix::fs::symlink(home.path().join(".ssh"), home.path().join("innocent")).unwrap();
      let cfg = LocalJailConfig {
-@@ -79,6 +89,7 @@ fn credential_floor_holds_for_a_symlink_into_a_credential_dir() {
+@@ -79,6 +96,7 @@ fn credential_floor_holds_for_a_symlink_into_a_credential_dir() {
  
  #[test]
  fn toolchain_homes_are_granted_when_they_exist() {
@@ -251,7 +266,7 @@ index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..16a7d9c3fac542cfe99f04ec7110de51
      let home = fake_home();
      let cargo = home.path().join(".cargo");
      for dir in ["bin", "registry", "git"] {
-@@ -117,8 +128,288 @@ fn toolchain_homes_are_granted_when_they_exist() {
+@@ -117,8 +135,324 @@ fn toolchain_homes_are_granted_when_they_exist() {
      }
  }
  
@@ -399,6 +414,42 @@ index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..16a7d9c3fac542cfe99f04ec7110de51
 +    assert!(has(&grants.read_write, &canon(&cache)));
 +}
 +
++#[cfg(unix)]
++#[test]
++fn non_utf8_toolchain_homes_keep_selective_grants_and_alias_floor() {
++    let home = fake_home();
++    let install = tempfile::tempdir().unwrap();
++    let rustup = non_utf8_child(install.path(), b"rustup-\xff-home");
++    let cargo = non_utf8_child(install.path(), b"cargo-\xfe-home");
++    let cache = non_utf8_child(install.path(), b"cache-\xfd-home");
++    fs::create_dir_all(rustup.join("toolchains")).unwrap();
++    fs::create_dir_all(cargo.join("bin")).unwrap();
++    fs::create_dir_all(&cache).unwrap();
++    fs::write(cargo.join("credentials.toml"), "fixture-secret").unwrap();
++    std::os::unix::fs::symlink(&rustup, cargo.join("registry")).unwrap();
++    std::os::unix::fs::symlink(&cache, cargo.join("git")).unwrap();
++
++    let _env = EnvVarGuard::locked()
++        .with("RUSTUP_HOME", rustup.as_os_str())
++        .with("CARGO_HOME", cargo.as_os_str());
++    let grants = resolve_local_jail_grants(Some(home.path()), &LocalJailConfig::default());
++    let rustup = canon(&rustup);
++    let cargo = canon(&cargo);
++    let cache = canon(&cache);
++
++    assert!(has(&grants.read_only, &rustup));
++    assert!(has(&grants.read_only, &cargo.join("bin")));
++    assert!(!all(&grants).iter().any(|path| path == &cargo));
++    assert!(grants
++        .read_write
++        .iter()
++        .all(|path| { !path.starts_with(&rustup) && !rustup.starts_with(path) }));
++    assert!(has(&grants.read_write, &cache));
++    assert!(!all(&grants)
++        .iter()
++        .any(|path| path.ends_with("credentials.toml")));
++}
++
 +#[test]
 +fn custom_rust_homes_inside_credential_stores_are_refused() {
 +    let home = fake_home();
@@ -540,7 +591,7 @@ index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..16a7d9c3fac542cfe99f04ec7110de51
      let home = tempfile::tempdir().unwrap();
      fs::create_dir_all(home.path().join(".nvm")).unwrap();
      let g = resolve_local_jail_grants(Some(home.path()), &LocalJailConfig::default());
-@@ -132,6 +423,16 @@ fn absent_toolchain_homes_are_not_granted() {
+@@ -132,6 +466,16 @@ fn absent_toolchain_homes_are_not_granted() {
  fn toolchain_homes_can_be_switched_off() {
      let home = fake_home();
      fs::write(home.path().join(".gitconfig"), "[user]\n name = x\n").unwrap();
@@ -557,7 +608,7 @@ index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..16a7d9c3fac542cfe99f04ec7110de51
      let cfg = LocalJailConfig {
          toolchain_homes: false,
          ..LocalJailConfig::default()
-@@ -142,6 +443,7 @@ fn toolchain_homes_can_be_switched_off() {
+@@ -142,6 +486,7 @@ fn toolchain_homes_can_be_switched_off() {
  
  #[test]
  fn cargo_home_with_registry_credentials_is_granted_piecewise() {
@@ -565,7 +616,7 @@ index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..16a7d9c3fac542cfe99f04ec7110de51
      let home = fake_home();
      let cargo = home.path().join(".cargo");
      for d in ["bin", "registry", "git"] {
-@@ -168,6 +470,7 @@ fn cargo_home_with_registry_credentials_is_granted_piecewise() {
+@@ -168,6 +513,7 @@ fn cargo_home_with_registry_credentials_is_granted_piecewise() {
  
  #[test]
  fn a_writable_grant_subsumes_the_same_path_read_only() {
@@ -573,7 +624,7 @@ index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..16a7d9c3fac542cfe99f04ec7110de51
      let home = fake_home();
      let cfg = LocalJailConfig {
          extra_read_only: vec!["~/.npm".into()],
-@@ -182,6 +485,7 @@ fn a_writable_grant_subsumes_the_same_path_read_only() {
+@@ -182,6 +528,7 @@ fn a_writable_grant_subsumes_the_same_path_read_only() {
  
  #[test]
  fn proc_is_off_by_default_and_only_the_toggle_grants_it() {
@@ -581,7 +632,7 @@ index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..16a7d9c3fac542cfe99f04ec7110de51
      let home = fake_home();
      let g = resolve_local_jail_grants(Some(home.path()), &LocalJailConfig::default());
      assert!(!all(&g).iter().any(|p| p.starts_with("/proc")));
-@@ -205,6 +509,7 @@ fn proc_is_off_by_default_and_only_the_toggle_grants_it() {
+@@ -205,6 +552,7 @@ fn proc_is_off_by_default_and_only_the_toggle_grants_it() {
  
  #[test]
  fn extras_expand_tilde_and_skip_missing_paths() {
@@ -589,7 +640,7 @@ index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..16a7d9c3fac542cfe99f04ec7110de51
      let home = fake_home();
      fs::create_dir_all(home.path().join("dotfiles")).unwrap();
      fs::create_dir_all(home.path().join("data")).unwrap();
-@@ -221,6 +526,7 @@ fn extras_expand_tilde_and_skip_missing_paths() {
+@@ -221,6 +569,7 @@ fn extras_expand_tilde_and_skip_missing_paths() {
  
  #[test]
  fn gitconfig_symlink_and_include_targets_are_canonicalized() {
@@ -597,7 +648,7 @@ index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..16a7d9c3fac542cfe99f04ec7110de51
      let home = fake_home();
      let dots = home.path().join("dotfiles");
      fs::create_dir_all(&dots).unwrap();
-@@ -247,6 +553,7 @@ fn gitconfig_symlink_and_include_targets_are_canonicalized() {
+@@ -247,6 +596,7 @@ fn gitconfig_symlink_and_include_targets_are_canonicalized() {
  
  #[test]
  fn gitconfig_include_cycles_terminate() {
@@ -605,7 +656,7 @@ index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..16a7d9c3fac542cfe99f04ec7110de51
      let home = fake_home();
      fs::write(home.path().join(".gitconfig"), "[include]\n path = ~/b\n").unwrap();
      fs::write(home.path().join("b"), "[include]\n path = ~/.gitconfig\n").unwrap();
-@@ -256,6 +563,7 @@ fn gitconfig_include_cycles_terminate() {
+@@ -256,6 +606,7 @@ fn gitconfig_include_cycles_terminate() {
  
  #[test]
  fn no_home_yields_only_system_toolchain_dirs() {
@@ -614,46 +665,57 @@ index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..16a7d9c3fac542cfe99f04ec7110de51
      assert!(g.read_write.is_empty());
      assert!(g
 diff --git a/crates/openhuman-core/src/sandbox/ops.rs b/crates/openhuman-core/src/sandbox/ops.rs
-index 84a0d60806a7956b83254da3ffdfa3df21af7478..cd8fe7c7fa0af4b2fdeb50368ef485d56d31bc0e 100644
+index 84a0d60806a7956b83254da3ffdfa3df21af7478..dffe9d056a4f808d20ad80d6d149d3c2bfe7ee3f 100644
 --- a/crates/openhuman-core/src/sandbox/ops.rs
 +++ b/crates/openhuman-core/src/sandbox/ops.rs
-@@ -21,6 +21,10 @@ pub const SANDBOX_ENV_PASSTHROUGH: &[&str] = &[
+@@ -21,6 +21,11 @@ pub const SANDBOX_ENV_PASSTHROUGH: &[&str] = &[
      "PATH", "HOME", "TERM", "LANG", "LC_ALL", "LC_CTYPE", "USER", "SHELL", "TMPDIR",
  ];
  
-+/// Native toolchain homes are available to host-local commands only. Docker
-+/// keeps its own image-provided Rust toolchain environment.
++/// Native toolchain homes are OS paths available to host-local commands only;
++/// keep their byte-preserving forwarding separate from the Unicode shared
++/// sandbox allowlist. Docker keeps its image-provided Rust toolchain env.
 +const HOST_TOOLCHAIN_ENV_PASSTHROUGH: &[&str] = &["RUSTUP_HOME", "CARGO_HOME"];
 +
  /// Host switch that turns the agent sandbox off for the whole process.
  ///
  /// For hosts that already isolate the core (a container, a CI or benchmark
-@@ -257,7 +261,11 @@ async fn execute_unsandboxed(
+@@ -257,11 +262,16 @@ async fn execute_unsandboxed(
      let mut cmd = platform_shell::build_tokio_command(command);
      cmd.current_dir(working_dir);
      cmd.env_clear();
 -    for var in SANDBOX_ENV_PASSTHROUGH {
-+    for var in SANDBOX_ENV_PASSTHROUGH
-+        .iter()
-+        .chain(HOST_TOOLCHAIN_ENV_PASSTHROUGH.iter())
-+        .copied()
-+    {
++    for var in SANDBOX_ENV_PASSTHROUGH.iter().copied() {
          if let Ok(val) = std::env::var(var) {
              cmd.env(var, val);
          }
-@@ -385,7 +393,11 @@ async fn execute_local_jail(
+     }
++    for var in HOST_TOOLCHAIN_ENV_PASSTHROUGH.iter().copied() {
++        if let Some(val) = std::env::var_os(var) {
++            cmd.env(var, val);
++        }
++    }
+     for (k, v) in extra_env {
+         cmd.env(k, v);
+     }
+@@ -385,11 +395,16 @@ async fn execute_local_jail(
      let mut cmd = platform_shell::build_std_command(&wrapped);
      cmd.current_dir(working_dir);
      cmd.env_clear();
 -    for var in SANDBOX_ENV_PASSTHROUGH {
-+    for var in SANDBOX_ENV_PASSTHROUGH
-+        .iter()
-+        .chain(HOST_TOOLCHAIN_ENV_PASSTHROUGH.iter())
-+        .copied()
-+    {
++    for var in SANDBOX_ENV_PASSTHROUGH.iter().copied() {
          if let Ok(val) = std::env::var(var) {
              cmd.env(var, val);
          }
+     }
++    for var in HOST_TOOLCHAIN_ENV_PASSTHROUGH.iter().copied() {
++        if let Some(val) = std::env::var_os(var) {
++            cmd.env(var, val);
++        }
++    }
+     cmd.env("TMPDIR", &scratch.path);
+     for (k, v) in extra_env {
+         cmd.env(k, v);
 diff --git a/crates/openhuman-core/src/sandbox/ops_tests.rs b/crates/openhuman-core/src/sandbox/ops_tests.rs
 index 374ced5cb81f21d5704fd404c1430838ade0bdc5..2e952cd1f76c06556e5065f0aee904a8da592c11 100644
 --- a/crates/openhuman-core/src/sandbox/ops_tests.rs
@@ -690,73 +752,125 @@ index 374ced5cb81f21d5704fd404c1430838ade0bdc5..2e952cd1f76c06556e5065f0aee904a8
 +mod toolchain_homes;
 diff --git a/crates/openhuman-core/src/sandbox/ops_toolchain_tests.rs b/crates/openhuman-core/src/sandbox/ops_toolchain_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..a0c565d694826c6333e4035d1bf1905d7b09800f
+index 0000000000000000000000000000000000000000..f8dc9fa111bd1deb5cd52c0a3b5dd39568705596
 --- /dev/null
 +++ b/crates/openhuman-core/src/sandbox/ops_toolchain_tests.rs
-@@ -0,0 +1,150 @@
+@@ -0,0 +1,198 @@
 +use super::*;
++#[cfg(unix)]
++use std::os::unix::ffi::{OsStrExt, OsStringExt};
++#[cfg(unix)]
++use std::path::{Path, PathBuf};
++
++#[cfg(unix)]
++const TOOLCHAIN_PATH_HEX_PROBE: &str = r#"printf '%s\n' "${RUSTUP_HOME+x}:$(printf '%s' "$RUSTUP_HOME" | od -An -tx1 | tr -d ' \n')" "${CARGO_HOME+x}:$(printf '%s' "$CARGO_HOME" | od -An -tx1 | tr -d ' \n')""#;
++
++#[cfg(unix)]
++fn non_utf8_child(parent: &Path, name: &[u8]) -> PathBuf {
++    parent.join(std::ffi::OsString::from_vec(name.to_vec()))
++}
++
++#[cfg(unix)]
++fn hex_path(path: &Path) -> String {
++    let mut hex = String::new();
++    for byte in path.as_os_str().as_bytes() {
++        hex.push_str(&format!("{byte:02x}"));
++    }
++    hex
++}
 +
 +#[cfg(unix)]
 +#[tokio::test]
-+async fn local_jail_forwards_nonempty_toolchain_homes_without_cargo() {
++async fn local_jail_forwards_non_utf8_toolchain_homes_without_cargo() {
 +    let action = tempfile::tempdir().unwrap();
 +    let state = tempfile::tempdir().unwrap();
-+    let rustup_home = tempfile::tempdir().unwrap();
-+    let cargo_home = tempfile::tempdir().unwrap();
-+    let rustup_value = rustup_home.path().to_string_lossy().into_owned();
-+    let cargo_value = cargo_home.path().to_string_lossy().into_owned();
++    let homes = tempfile::tempdir().unwrap();
++    let rustup_home = non_utf8_child(homes.path(), b"rustup-\xff-home");
++    let cargo_home = non_utf8_child(homes.path(), b"cargo-\xfe-home");
++    std::fs::create_dir_all(&rustup_home).unwrap();
++    std::fs::create_dir_all(&cargo_home).unwrap();
++    let expected = format!(
++        "x:{}\nx:{}\n",
++        hex_path(&rustup_home),
++        hex_path(&cargo_home)
++    );
 +    let _env = crate::config::test_env::EnvVarGuard::locked_async()
 +        .await
-+        .with("RUSTUP_HOME", &rustup_value)
-+        .with("CARGO_HOME", &cargo_value);
++        .with("RUSTUP_HOME", rustup_home.as_os_str())
++        .with("CARGO_HOME", cargo_home.as_os_str());
++    let unsandboxed_policy = resolve_sandbox_policy(
++        SandboxMode::None,
++        action.path(),
++        state.path(),
++        &RuntimeConfig::default(),
++        false,
++    );
++    let unsandboxed = run_local(&unsandboxed_policy, TOOLCHAIN_PATH_HEX_PROBE).await;
++    assert!(
++        unsandboxed.success(),
++        "unsandboxed toolchain-home probe failed: {}",
++        unsandboxed.stderr
++    );
++    assert_eq!(
++        unsandboxed.stdout, expected,
++        "unsandboxed spawn must forward non-UTF-8 toolchain paths byte-for-byte"
++    );
 +    let policy = local_policy(action.path(), state.path());
 +
-+    // These paths exercise forwarding alone. The child only prints them; no
-+    // Cargo command consumes them as though they held a real toolchain.
-+    let result = run_local(
-+        &policy,
-+        "printf '%s\\n' \"${RUSTUP_HOME-}\" \"${CARGO_HOME-}\"",
-+    )
-+    .await;
++    // Hex makes the child's view inspectable without converting its raw path
++    // bytes through a lossy String representation.
++    let result = run_local(&policy, TOOLCHAIN_PATH_HEX_PROBE).await;
 +    assert!(
 +        result.success(),
 +        "toolchain-home probe failed: {}",
 +        result.stderr
 +    );
 +    assert_eq!(
-+        result.stdout,
-+        format!("{rustup_value}\n{cargo_value}\n"),
-+        "local sandbox must forward explicitly configured nonempty toolchain homes"
++        result.stdout, expected,
++        "local sandbox must forward non-UTF-8 toolchain paths byte-for-byte"
++    );
++
++    drop(_env);
++    let _env = crate::config::test_env::EnvVarGuard::locked_async()
++        .await
++        .with("RUSTUP_HOME", "")
++        .with("CARGO_HOME", "relative/cargo");
++    let policy = local_policy(action.path(), state.path());
++    let result = run_local(&policy, TOOLCHAIN_PATH_HEX_PROBE).await;
++    assert!(
++        result.success(),
++        "relative-value probe failed: {}",
++        result.stderr
++    );
++    assert_eq!(
++        result.stdout, "x:\nx:72656c61746976652f636172676f\n",
++        "empty and relative host paths must retain exact forwarding"
 +    );
 +}
 +
 +#[cfg(target_os = "linux")]
 +#[tokio::test]
-+async fn landlock_custom_toolchain_homes_keep_selective_access() {
++async fn landlock_non_utf8_custom_toolchain_homes_keep_selective_access() {
 +    if !landlock_in_force() {
 +        return;
 +    }
 +    let action = tempfile::tempdir().unwrap();
 +    let state = tempfile::tempdir().unwrap();
-+    let rustup_home = tempfile::tempdir().unwrap();
-+    let cargo_home = tempfile::tempdir().unwrap();
-+    let (Some(rustup_value), Some(cargo_value)) = (
-+        rustup_home.path().to_str().map(str::to_owned),
-+        cargo_home.path().to_str().map(str::to_owned),
-+    ) else {
-+        eprintln!("SKIP: generated toolchain fixture path is not Unicode");
-+        return;
-+    };
++    let homes = tempfile::tempdir().unwrap();
++    let rustup_home = non_utf8_child(homes.path(), b"rustup-\xff-home");
++    let cargo_home = non_utf8_child(homes.path(), b"cargo-\xfe-home");
++    std::fs::create_dir_all(&rustup_home).unwrap();
++    std::fs::create_dir_all(&cargo_home).unwrap();
 +    for child in ["bin", "registry", "git"] {
-+        std::fs::create_dir(cargo_home.path().join(child)).unwrap();
++        std::fs::create_dir(cargo_home.join(child)).unwrap();
 +    }
-+    std::fs::write(rustup_home.path().join("toolchain"), "rust-fixture").unwrap();
-+    std::fs::write(cargo_home.path().join("bin/tool"), "cargo-fixture").unwrap();
-+    std::fs::write(cargo_home.path().join("credentials.toml"), "fixture-secret").unwrap();
++    std::fs::write(rustup_home.join("toolchain"), "rust-fixture").unwrap();
++    std::fs::write(cargo_home.join("bin/tool"), "cargo-fixture").unwrap();
++    std::fs::write(cargo_home.join("credentials.toml"), "fixture-secret").unwrap();
 +    let _env = crate::config::test_env::EnvVarGuard::locked_async()
 +        .await
-+        .with("RUSTUP_HOME", &rustup_value)
-+        .with("CARGO_HOME", &cargo_value);
++        .with("RUSTUP_HOME", rustup_home.as_os_str())
++        .with("CARGO_HOME", cargo_home.as_os_str());
 +    let policy = local_policy(action.path(), state.path());
 +    let reads = run_local(
 +        &policy,
@@ -789,35 +903,31 @@ index 0000000000000000000000000000000000000000..a0c565d694826c6333e4035d1bf1905d
 +        assert!(!result.success(), "selective access allowed {command}");
 +    }
 +    assert_eq!(
-+        std::fs::read_to_string(rustup_home.path().join("toolchain")).unwrap(),
++        std::fs::read_to_string(rustup_home.join("toolchain")).unwrap(),
 +        "rust-fixture"
 +    );
 +    assert_eq!(
-+        std::fs::read_to_string(cargo_home.path().join("bin/tool")).unwrap(),
++        std::fs::read_to_string(cargo_home.join("bin/tool")).unwrap(),
 +        "cargo-fixture"
 +    );
 +    assert_eq!(
-+        std::fs::read_to_string(cargo_home.path().join("registry/probe")).unwrap(),
++        std::fs::read_to_string(cargo_home.join("registry/probe")).unwrap(),
 +        "registry"
 +    );
 +    assert_eq!(
-+        std::fs::read_to_string(cargo_home.path().join("git/probe")).unwrap(),
++        std::fs::read_to_string(cargo_home.join("git/probe")).unwrap(),
 +        "git"
 +    );
 +
 +    drop(_env);
-+    let alias_cargo = tempfile::tempdir().unwrap();
-+    std::fs::create_dir(alias_cargo.path().join("bin")).unwrap();
-+    std::fs::create_dir(alias_cargo.path().join("git")).unwrap();
-+    std::os::unix::fs::symlink(rustup_home.path(), alias_cargo.path().join("registry")).unwrap();
-+    let Some(alias_cargo_value) = alias_cargo.path().to_str().map(str::to_owned) else {
-+        eprintln!("SKIP: generated Cargo alias fixture path is not Unicode");
-+        return;
-+    };
++    let alias_cargo = non_utf8_child(homes.path(), b"alias-cargo-\xfd-home");
++    std::fs::create_dir(alias_cargo.join("bin")).unwrap();
++    std::fs::create_dir(alias_cargo.join("git")).unwrap();
++    std::os::unix::fs::symlink(&rustup_home, alias_cargo.join("registry")).unwrap();
 +    let _env = crate::config::test_env::EnvVarGuard::locked_async()
 +        .await
-+        .with("RUSTUP_HOME", &rustup_value)
-+        .with("CARGO_HOME", &alias_cargo_value);
++        .with("RUSTUP_HOME", rustup_home.as_os_str())
++        .with("CARGO_HOME", alias_cargo.as_os_str());
 +    let alias_policy = local_policy(action.path(), state.path());
 +    let cache_alias_write = run_local(
 +        &alias_policy,
@@ -829,7 +939,7 @@ index 0000000000000000000000000000000000000000..a0c565d694826c6333e4035d1bf1905d
 +        "Cargo cache alias wrote through to RUSTUP_HOME"
 +    );
 +    assert_eq!(
-+        std::fs::read_to_string(rustup_home.path().join("toolchain")).unwrap(),
++        std::fs::read_to_string(rustup_home.join("toolchain")).unwrap(),
 +        "rust-fixture"
 +    );
 +    let alias_cache_write =
@@ -840,7 +950,7 @@ index 0000000000000000000000000000000000000000..a0c565d694826c6333e4035d1bf1905d
 +        alias_cache_write.stderr
 +    );
 +    assert_eq!(
-+        std::fs::read_to_string(alias_cargo.path().join("git/probe")).unwrap(),
++        std::fs::read_to_string(alias_cargo.join("git/probe")).unwrap(),
 +        "git"
 +    );
 +}
@@ -858,7 +968,7 @@ index 023788306fe091726b2d4736262e7e47e3d43b5d..5ab08c2e99cd90955ca676747994d4b8
  
  - [ ] **Agent files land in a visible folder** — Ask the agent for a short document or deck. Expected: the file appears in `~/OpenHuman/projects/Files` under its title (not in `~/.openhuman`); **Show in folder** in the chat Files panel opens the file manager at it; Settings → Agent OS access → **Files folder** shows that path, **Show in folder** opens it, and choosing another folder sends the next file there while the earlier file still opens. On an upgraded install, files from before the upgrade have moved into the folder.
 diff --git a/docs/TEST-COVERAGE-MATRIX.md b/docs/TEST-COVERAGE-MATRIX.md
-index bde4641cdb2ada3dec5d418a465fb2def0654691..bb2b791bd76d2e284a379f17792925bb4a1c3c67 100644
+index bde4641cdb2ada3dec5d418a465fb2def0654691..a86fa89804ee17ff306d3655fc89ad9335ac40fc 100644
 --- a/docs/TEST-COVERAGE-MATRIX.md
 +++ b/docs/TEST-COVERAGE-MATRIX.md
 @@ -272,7 +272,7 @@ End-to-end coverage of the agent harness via the web-chat RPC surface against an
@@ -866,7 +976,7 @@ index bde4641cdb2ada3dec5d418a465fb2def0654691..bb2b791bd76d2e284a379f17792925bb
  | ID    | Feature                      | Layer | Test path(s)                                                                                                    | Status | Notes                                                                                            |
  | ----- | ---------------------------- | ----- | --------------------------------------------------------------------------------------------------------------- | ------ | ------------------------------------------------------------------------------------------------ |
 -| 6.2.1 | Shell Command Execution      | RU+WD | `crates/openhuman-core/src/tools/impl/system/shell.rs`, `app/test/e2e/specs/tool-shell-git-flow.spec.ts`                    | ✅     | Was 🟡 — WDIO asserts agent runtime + the shell-bearing agent registry contract (the orchestrator since `tools_agent` was removed); full LLM path tracked #68 |
-+| 6.2.1 | Shell Command Execution      | RU+RI+WD | `crates/openhuman-core/src/tools/impl/system/shell.rs`, `crates/openhuman-core/src/sandbox/ops_tests.rs`, `tests/agent_harness_e2e.rs` (`sandboxed_shell_forwards_host_toolchain_homes_and_confines_writes`), `app/test/e2e/specs/tool-shell-git-flow.spec.ts` | ✅     | Was 🟡 — WDIO asserts agent runtime + the shell-bearing agent registry contract (the orchestrator since `tools_agent` was removed); full LLM path tracked #68; Rust toolchain startup is covered through the real Landlock Cargo fixture and an agent-shell RPC/model-loop E2E, including observed custom homes, Cargo startup, scratch files, workspace writes and outside-workspace write denial; `crates/openhuman-core/src/sandbox/ops_toolchain_tests.rs` (`landlock_custom_toolchain_homes_keep_selective_access`) verifies read-only toolchain files, registry/git cache writes and Cargo credential denial |
++| 6.2.1 | Shell Command Execution      | RU+RI+WD | `crates/openhuman-core/src/tools/impl/system/shell.rs`, `crates/openhuman-core/src/sandbox/ops_tests.rs`, `tests/agent_harness_e2e.rs` (`sandboxed_shell_forwards_host_toolchain_homes_and_confines_writes`), `app/test/e2e/specs/tool-shell-git-flow.spec.ts` | ✅     | Was 🟡 — WDIO asserts agent runtime + the shell-bearing agent registry contract (the orchestrator since `tools_agent` was removed); full LLM path tracked #68; Rust toolchain startup is covered through the real Landlock Cargo fixture and an agent-shell RPC/model-loop E2E, including observed custom homes, Cargo startup, scratch files, workspace writes and outside-workspace write denial; `crates/openhuman-core/src/sandbox/ops_toolchain_tests.rs` (`landlock_non_utf8_custom_toolchain_homes_keep_selective_access`) verifies read-only toolchain files, registry/git cache writes and Cargo credential denial |
  | 6.2.2 | Command Restriction Handling | RU+WD | `crates/openhuman-core/src/security/policy/policy_tests.rs` (+ `policy_injection_tests.rs`), `app/test/e2e/specs/tool-shell-git-flow.spec.ts`                      | ✅     | Was 🟡 — WDIO locks denial envelope shape `{ ok:false, error }` consumed by the React UI         |
  | 6.2.3 | Git Read Operations          | RU+WD | `vendor/tinyagents/vendor/tinytools/crates/tinytools-std/src/filesystem/git_operations/test.rs`, `app/test/e2e/specs/tool-shell-git-flow.spec.ts` | ✅     | Was 🟡 — WDIO seeds a fixture repo in OPENHUMAN_WORKSPACE and asserts read ops succeed           |
  | 6.2.4 | Git Write Operations         | RU+WD | `vendor/tinyagents/vendor/tinytools/crates/tinytools-std/src/filesystem/git_operations/test.rs`, `app/test/e2e/specs/tool-shell-git-flow.spec.ts` | ✅     | Was 🟡 — WDIO commits into the same fixture and asserts log advances                             |

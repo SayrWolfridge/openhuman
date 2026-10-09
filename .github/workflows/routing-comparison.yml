@@ -74,6 +74,29 @@ jobs:
       - uses: taiki-e/install-action@cargo-llvm-cov
       - name: Install canonical test modules
         run: bash scripts/ci/self-hosted/install-test-modules.sh "/opt/openhuman-test-modules/${GITHUB_RUN_ID}-pr7037" ci-out/test-modules.env
+      - name: Reproduce non-UTF8 regression on published production source
+        run: |
+          set -euo pipefail
+          set -a
+          source ci-out/test-modules.env
+          set +a
+          unset RUSTFLAGS
+          cp crates/openhuman-core/src/sandbox/ops.rs ci-out/fixed-ops.rs
+          cp crates/openhuman-core/src/sandbox/grants.rs ci-out/fixed-grants.rs
+          cp diagnostic-inputs/.github/diagnostics/pr7037-before-ops.rs crates/openhuman-core/src/sandbox/ops.rs
+          cp diagnostic-inputs/.github/diagnostics/pr7037-before-grants.rs crates/openhuman-core/src/sandbox/grants.rs
+          sha256sum crates/openhuman-core/src/sandbox/ops.rs crates/openhuman-core/src/sandbox/grants.rs > ci-out/non-utf8-before-source-hashes.txt
+          FEATURES="$(bash scripts/ci/product-features.sh)"
+          set +e
+          bash scripts/ci-cancel-aware.sh cargo test --features "$FEATURES" -p openhuman --lib -- non_utf8 --test-threads=1 2>&1 | tee ci-out/non-utf8-before.log
+          before_status=${PIPESTATUS[0]}
+          set -e
+          cp ci-out/fixed-ops.rs crates/openhuman-core/src/sandbox/ops.rs
+          cp ci-out/fixed-grants.rs crates/openhuman-core/src/sandbox/grants.rs
+          test "$before_status" -ne 0
+          grep -Eq 'test result: FAILED\. .* [1-9][0-9]* failed;' ci-out/non-utf8-before.log
+          if grep -Eq 'error\[E[0-9]+' ci-out/non-utf8-before.log; then exit 1; fi
+          sha256sum -c ci-out/source-hashes.txt
       - name: Clear coverage and run scoped Rust regressions
         run: bash scripts/ci-cancel-aware.sh cargo llvm-cov clean --workspace
       - name: Run actual agent shell E2E and all sandbox regressions
