@@ -1,6 +1,8 @@
 use super::*;
 use crate::config::test_env::EnvVarGuard;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 
 fn fake_home() -> tempfile::TempDir {
@@ -15,6 +17,11 @@ fn fake_home() -> tempfile::TempDir {
 
 fn canon(p: &Path) -> PathBuf {
     p.canonicalize().unwrap()
+}
+
+#[cfg(unix)]
+fn non_utf8_child(parent: &Path, name: &[u8]) -> PathBuf {
+    parent.join(std::ffi::OsString::from_vec(name.to_vec()))
 }
 
 fn has(grants: &[PathBuf], p: &Path) -> bool {
@@ -270,6 +277,42 @@ fn cargo_cache_aliases_cannot_upgrade_configured_rustup_home() {
         .iter()
         .all(|path| { !path.starts_with(&default_rustup) && !default_rustup.starts_with(path) }));
     assert!(has(&grants.read_write, &canon(&cache)));
+}
+
+#[cfg(unix)]
+#[test]
+fn non_utf8_toolchain_homes_keep_selective_grants_and_alias_floor() {
+    let home = fake_home();
+    let install = tempfile::tempdir().unwrap();
+    let rustup = non_utf8_child(install.path(), b"rustup-\xff-home");
+    let cargo = non_utf8_child(install.path(), b"cargo-\xfe-home");
+    let cache = non_utf8_child(install.path(), b"cache-\xfd-home");
+    fs::create_dir_all(rustup.join("toolchains")).unwrap();
+    fs::create_dir_all(cargo.join("bin")).unwrap();
+    fs::create_dir_all(&cache).unwrap();
+    fs::write(cargo.join("credentials.toml"), "fixture-secret").unwrap();
+    std::os::unix::fs::symlink(&rustup, cargo.join("registry")).unwrap();
+    std::os::unix::fs::symlink(&cache, cargo.join("git")).unwrap();
+
+    let _env = EnvVarGuard::locked()
+        .with("RUSTUP_HOME", rustup.as_os_str())
+        .with("CARGO_HOME", cargo.as_os_str());
+    let grants = resolve_local_jail_grants(Some(home.path()), &LocalJailConfig::default());
+    let rustup = canon(&rustup);
+    let cargo = canon(&cargo);
+    let cache = canon(&cache);
+
+    assert!(has(&grants.read_only, &rustup));
+    assert!(has(&grants.read_only, &cargo.join("bin")));
+    assert!(!all(&grants).iter().any(|path| path == &cargo));
+    assert!(grants
+        .read_write
+        .iter()
+        .all(|path| { !path.starts_with(&rustup) && !rustup.starts_with(path) }));
+    assert!(has(&grants.read_write, &cache));
+    assert!(!all(&grants)
+        .iter()
+        .any(|path| path.ends_with("credentials.toml")));
 }
 
 #[test]

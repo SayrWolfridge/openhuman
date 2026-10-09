@@ -179,7 +179,7 @@ impl<'a> Builder<'a> {
         if let Some(home) = self.home {
             roots.push(home.join(".cargo"));
         }
-        if let Ok(raw) = std::env::var("CARGO_HOME") {
+        if let Some(raw) = std::env::var_os("CARGO_HOME") {
             let configured = PathBuf::from(raw);
             if configured.is_absolute() {
                 roots.push(configured);
@@ -200,7 +200,7 @@ impl<'a> Builder<'a> {
         if let Some(home) = self.home {
             roots.push(home.join(".rustup"));
         }
-        if let Ok(raw) = std::env::var("RUSTUP_HOME") {
+        if let Some(raw) = std::env::var_os("RUSTUP_HOME") {
             let configured = PathBuf::from(raw);
             if configured.is_absolute() {
                 roots.push(configured);
@@ -251,10 +251,10 @@ impl<'a> Builder<'a> {
     }
 
     /// Admit explicitly selected host Rust homes when the built-in toolchain
-    /// grants are enabled. Match `ops`' Unicode environment-value semantics;
-    /// jail admission additionally requires absolute paths to existing dirs.
+    /// grants are enabled. Preserve OS-string paths like the native spawn
+    /// builders; jail admission additionally requires absolute existing dirs.
     fn add_host_toolchain_homes(&mut self) {
-        if let Ok(raw) = std::env::var("RUSTUP_HOME") {
+        if let Some(raw) = std::env::var_os("RUSTUP_HOME") {
             let rustup = PathBuf::from(raw);
             if rustup.is_absolute() && rustup.is_dir() {
                 if let Some(path) = self.admit(&rustup, "RUSTUP_HOME") {
@@ -265,7 +265,7 @@ impl<'a> Builder<'a> {
             }
         }
 
-        if let Ok(raw) = std::env::var("CARGO_HOME") {
+        if let Some(raw) = std::env::var_os("CARGO_HOME") {
             let cargo = PathBuf::from(raw);
             if cargo.is_absolute() {
                 self.add_cargo_home(&cargo);
