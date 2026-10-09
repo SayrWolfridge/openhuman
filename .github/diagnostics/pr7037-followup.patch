@@ -197,7 +197,7 @@ index 7aaecac3978efbb4d546b72618470b7a3a62397d..56ad2b960d623487900f8611db05c778
      }
  
 diff --git a/crates/openhuman-core/src/sandbox/grants_tests.rs b/crates/openhuman-core/src/sandbox/grants_tests.rs
-index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..f43ac5d796cb0548ca63185790c630c39139ad01 100644
+index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..16a7d9c3fac542cfe99f04ec7110de51b781be85 100644
 --- a/crates/openhuman-core/src/sandbox/grants_tests.rs
 +++ b/crates/openhuman-core/src/sandbox/grants_tests.rs
 @@ -1,4 +1,5 @@
@@ -251,7 +251,7 @@ index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..f43ac5d796cb0548ca63185790c630c3
      let home = fake_home();
      let cargo = home.path().join(".cargo");
      for dir in ["bin", "registry", "git"] {
-@@ -117,8 +128,287 @@ fn toolchain_homes_are_granted_when_they_exist() {
+@@ -117,8 +128,288 @@ fn toolchain_homes_are_granted_when_they_exist() {
      }
  }
  
@@ -300,7 +300,8 @@ index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..f43ac5d796cb0548ca63185790c630c3
 +    let home = fake_home();
 +    let install = tempfile::tempdir().unwrap();
 +    let cargo = install.path().join("cargo-home");
-+    let cache = install.path().join("dedicated-cache");
++    let external_cache = tempfile::tempdir().unwrap();
++    let cache = external_cache.path().join("dedicated-cache");
 +    fs::create_dir_all(cargo.join("bin")).unwrap();
 +    fs::create_dir_all(&cache).unwrap();
 +    fs::write(cargo.join("credentials.toml"), "token = \"secret\"\n").unwrap();
@@ -539,7 +540,7 @@ index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..f43ac5d796cb0548ca63185790c630c3
      let home = tempfile::tempdir().unwrap();
      fs::create_dir_all(home.path().join(".nvm")).unwrap();
      let g = resolve_local_jail_grants(Some(home.path()), &LocalJailConfig::default());
-@@ -132,6 +422,16 @@ fn absent_toolchain_homes_are_not_granted() {
+@@ -132,6 +423,16 @@ fn absent_toolchain_homes_are_not_granted() {
  fn toolchain_homes_can_be_switched_off() {
      let home = fake_home();
      fs::write(home.path().join(".gitconfig"), "[user]\n name = x\n").unwrap();
@@ -556,7 +557,7 @@ index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..f43ac5d796cb0548ca63185790c630c3
      let cfg = LocalJailConfig {
          toolchain_homes: false,
          ..LocalJailConfig::default()
-@@ -142,6 +442,7 @@ fn toolchain_homes_can_be_switched_off() {
+@@ -142,6 +443,7 @@ fn toolchain_homes_can_be_switched_off() {
  
  #[test]
  fn cargo_home_with_registry_credentials_is_granted_piecewise() {
@@ -564,7 +565,7 @@ index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..f43ac5d796cb0548ca63185790c630c3
      let home = fake_home();
      let cargo = home.path().join(".cargo");
      for d in ["bin", "registry", "git"] {
-@@ -168,6 +469,7 @@ fn cargo_home_with_registry_credentials_is_granted_piecewise() {
+@@ -168,6 +470,7 @@ fn cargo_home_with_registry_credentials_is_granted_piecewise() {
  
  #[test]
  fn a_writable_grant_subsumes_the_same_path_read_only() {
@@ -572,7 +573,7 @@ index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..f43ac5d796cb0548ca63185790c630c3
      let home = fake_home();
      let cfg = LocalJailConfig {
          extra_read_only: vec!["~/.npm".into()],
-@@ -182,6 +484,7 @@ fn a_writable_grant_subsumes_the_same_path_read_only() {
+@@ -182,6 +485,7 @@ fn a_writable_grant_subsumes_the_same_path_read_only() {
  
  #[test]
  fn proc_is_off_by_default_and_only_the_toggle_grants_it() {
@@ -580,7 +581,7 @@ index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..f43ac5d796cb0548ca63185790c630c3
      let home = fake_home();
      let g = resolve_local_jail_grants(Some(home.path()), &LocalJailConfig::default());
      assert!(!all(&g).iter().any(|p| p.starts_with("/proc")));
-@@ -205,6 +508,7 @@ fn proc_is_off_by_default_and_only_the_toggle_grants_it() {
+@@ -205,6 +509,7 @@ fn proc_is_off_by_default_and_only_the_toggle_grants_it() {
  
  #[test]
  fn extras_expand_tilde_and_skip_missing_paths() {
@@ -588,7 +589,7 @@ index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..f43ac5d796cb0548ca63185790c630c3
      let home = fake_home();
      fs::create_dir_all(home.path().join("dotfiles")).unwrap();
      fs::create_dir_all(home.path().join("data")).unwrap();
-@@ -221,6 +525,7 @@ fn extras_expand_tilde_and_skip_missing_paths() {
+@@ -221,6 +526,7 @@ fn extras_expand_tilde_and_skip_missing_paths() {
  
  #[test]
  fn gitconfig_symlink_and_include_targets_are_canonicalized() {
@@ -596,7 +597,7 @@ index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..f43ac5d796cb0548ca63185790c630c3
      let home = fake_home();
      let dots = home.path().join("dotfiles");
      fs::create_dir_all(&dots).unwrap();
-@@ -247,6 +552,7 @@ fn gitconfig_symlink_and_include_targets_are_canonicalized() {
+@@ -247,6 +553,7 @@ fn gitconfig_symlink_and_include_targets_are_canonicalized() {
  
  #[test]
  fn gitconfig_include_cycles_terminate() {
@@ -604,7 +605,7 @@ index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..f43ac5d796cb0548ca63185790c630c3
      let home = fake_home();
      fs::write(home.path().join(".gitconfig"), "[include]\n path = ~/b\n").unwrap();
      fs::write(home.path().join("b"), "[include]\n path = ~/.gitconfig\n").unwrap();
-@@ -256,6 +562,7 @@ fn gitconfig_include_cycles_terminate() {
+@@ -256,6 +563,7 @@ fn gitconfig_include_cycles_terminate() {
  
  #[test]
  fn no_home_yields_only_system_toolchain_dirs() {
