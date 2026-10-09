@@ -163,7 +163,7 @@ async fn landlock_non_utf8_custom_toolchain_homes_keep_selective_access() {
 
     drop(_env);
     let alias_cargo = non_utf8_child(homes.path(), b"alias-cargo-\xfd-home");
-    std::fs::create_dir(alias_cargo.join("bin")).unwrap();
+    std::fs::create_dir_all(alias_cargo.join("bin")).unwrap();
     std::fs::create_dir(alias_cargo.join("git")).unwrap();
     std::os::unix::fs::symlink(&rustup_home, alias_cargo.join("registry")).unwrap();
     let _env = crate::config::test_env::EnvVarGuard::locked_async()
