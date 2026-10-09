@@ -173,7 +173,8 @@ fn cargo_symlink_aliases_cannot_reach_root_or_credentials() {
     let home = fake_home();
     let install = tempfile::tempdir().unwrap();
     let cargo = install.path().join("cargo-home");
-    let cache = install.path().join("dedicated-cache");
+    let external_cache = tempfile::tempdir().unwrap();
+    let cache = external_cache.path().join("dedicated-cache");
     fs::create_dir_all(cargo.join("bin")).unwrap();
     fs::create_dir_all(&cache).unwrap();
     fs::write(cargo.join("credentials.toml"), "token = \"secret\"\n").unwrap();
