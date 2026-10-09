@@ -752,7 +752,7 @@ index 374ced5cb81f21d5704fd404c1430838ade0bdc5..2e952cd1f76c06556e5065f0aee904a8
 +mod toolchain_homes;
 diff --git a/crates/openhuman-core/src/sandbox/ops_toolchain_tests.rs b/crates/openhuman-core/src/sandbox/ops_toolchain_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..f8dc9fa111bd1deb5cd52c0a3b5dd39568705596
+index 0000000000000000000000000000000000000000..c3738985369ff48d346087bebc85e4caa7759574
 --- /dev/null
 +++ b/crates/openhuman-core/src/sandbox/ops_toolchain_tests.rs
 @@ -0,0 +1,198 @@
@@ -921,7 +921,7 @@ index 0000000000000000000000000000000000000000..f8dc9fa111bd1deb5cd52c0a3b5dd395
 +
 +    drop(_env);
 +    let alias_cargo = non_utf8_child(homes.path(), b"alias-cargo-\xfd-home");
-+    std::fs::create_dir(alias_cargo.join("bin")).unwrap();
++    std::fs::create_dir_all(alias_cargo.join("bin")).unwrap();
 +    std::fs::create_dir(alias_cargo.join("git")).unwrap();
 +    std::os::unix::fs::symlink(&rustup_home, alias_cargo.join("registry")).unwrap();
 +    let _env = crate::config::test_env::EnvVarGuard::locked_async()
