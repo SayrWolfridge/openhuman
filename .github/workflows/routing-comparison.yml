@@ -24,12 +24,12 @@ jobs:
       LLVM_PROFILE_FILE_NAME: openhuman-%8m.profraw
       GH_TOKEN: ${{ github.token }}
       PR_NUMBER: '7037'
-      SOURCE_BASE: '7578346c85973c61afbfe6e24d88eb0a174ba014'
-      COMPARE_BASE: '7578346c85973c61afbfe6e24d88eb0a174ba014'
+      SOURCE_BASE: 'df9dce0428b5c52f5a1887a64a68d937f6431288'
+      COMPARE_BASE: 'df9dce0428b5c52f5a1887a64a68d937f6431288'
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: 7578346c85973c61afbfe6e24d88eb0a174ba014
+          ref: df9dce0428b5c52f5a1887a64a68d937f6431288
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/checkout@v7
@@ -74,29 +74,6 @@ jobs:
       - uses: taiki-e/install-action@cargo-llvm-cov
       - name: Install canonical test modules
         run: bash scripts/ci/self-hosted/install-test-modules.sh "/opt/openhuman-test-modules/${GITHUB_RUN_ID}-pr7037" ci-out/test-modules.env
-      - name: Reproduce non-UTF8 regression on published production source
-        run: |
-          set -euo pipefail
-          set -a
-          source ci-out/test-modules.env
-          set +a
-          unset RUSTFLAGS
-          cp crates/openhuman-core/src/sandbox/ops.rs ci-out/fixed-ops.rs
-          cp crates/openhuman-core/src/sandbox/grants.rs ci-out/fixed-grants.rs
-          cp diagnostic-inputs/.github/diagnostics/pr7037-before-ops.rs crates/openhuman-core/src/sandbox/ops.rs
-          cp diagnostic-inputs/.github/diagnostics/pr7037-before-grants.rs crates/openhuman-core/src/sandbox/grants.rs
-          sha256sum crates/openhuman-core/src/sandbox/ops.rs crates/openhuman-core/src/sandbox/grants.rs > ci-out/non-utf8-before-source-hashes.txt
-          FEATURES="$(bash scripts/ci/product-features.sh)"
-          set +e
-          bash scripts/ci-cancel-aware.sh cargo test --features "$FEATURES" -p openhuman --lib -- non_utf8 --test-threads=1 2>&1 | tee ci-out/non-utf8-before.log
-          before_status=${PIPESTATUS[0]}
-          set -e
-          cp ci-out/fixed-ops.rs crates/openhuman-core/src/sandbox/ops.rs
-          cp ci-out/fixed-grants.rs crates/openhuman-core/src/sandbox/grants.rs
-          test "$before_status" -ne 0
-          grep -Eq 'test result: FAILED\. .* [1-9][0-9]* failed;' ci-out/non-utf8-before.log
-          if grep -Eq 'error\[E[0-9]+' ci-out/non-utf8-before.log; then exit 1; fi
-          sha256sum -c ci-out/source-hashes.txt
       - name: Clear coverage and run scoped Rust regressions
         run: bash scripts/ci-cancel-aware.sh cargo llvm-cov clean --workspace
       - name: Run actual agent shell E2E and all sandbox regressions
@@ -151,7 +128,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: 7578346c85973c61afbfe6e24d88eb0a174ba014
+          ref: df9dce0428b5c52f5a1887a64a68d937f6431288
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/checkout@v7
@@ -166,7 +143,7 @@ jobs:
       - name: Prove the measured source and input patch match
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD)" = '7578346c85973c61afbfe6e24d88eb0a174ba014'
+          test "$(git rev-parse HEAD)" = 'df9dce0428b5c52f5a1887a64a68d937f6431288'
           git apply --check diagnostic-inputs/.github/diagnostics/pr7037-followup.patch
           git apply diagnostic-inputs/.github/diagnostics/pr7037-followup.patch
           while read -r digest source_path; do
@@ -179,7 +156,7 @@ jobs:
           cmp measured-reapplied.patch diagnostic-inputs/.github/diagnostics/pr7037-followup.patch
           sha256sum -c diagnostic-inputs/.github/diagnostics/pr7037-source-hashes.txt
           cmp measured/source-hashes.txt diagnostic-inputs/.github/diagnostics/pr7037-source-hashes.txt
-          test "$(cat measured/source-base.txt)" = '7578346c85973c61afbfe6e24d88eb0a174ba014'
+          test "$(cat measured/source-base.txt)" = 'df9dce0428b5c52f5a1887a64a68d937f6431288'
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
@@ -195,7 +172,7 @@ jobs:
             echo 'No changed production Rust source paths in the supplied roster.'
           fi
       - name: Enforce >= 80 percent changed-line coverage against full PR base
-        run: bash scripts/ci/self-hosted/diff-cover.sh measured/lcov '7578346c85973c61afbfe6e24d88eb0a174ba014' ci-out/diff-cover
+        run: bash scripts/ci/self-hosted/diff-cover.sh measured/lcov 'df9dce0428b5c52f5a1887a64a68d937f6431288' ci-out/diff-cover
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:

@@ -665,10 +665,10 @@ index e490e6c464a03c6f32f269073bf3c3e75d6d4b4a..3757396204dd5e05cbd5c50bc41d7e81
      assert!(g.read_write.is_empty());
      assert!(g
 diff --git a/crates/openhuman-core/src/sandbox/ops.rs b/crates/openhuman-core/src/sandbox/ops.rs
-index 84a0d60806a7956b83254da3ffdfa3df21af7478..dffe9d056a4f808d20ad80d6d149d3c2bfe7ee3f 100644
+index 825fbd0d869b54ef851fd679ddacf60d3762f25e..92adf05c3dff413604b908e013f70df25e8c35c8 100644
 --- a/crates/openhuman-core/src/sandbox/ops.rs
 +++ b/crates/openhuman-core/src/sandbox/ops.rs
-@@ -21,6 +21,11 @@ pub const SANDBOX_ENV_PASSTHROUGH: &[&str] = &[
+@@ -35,6 +35,11 @@ pub const SANDBOX_ENV_PASSTHROUGH: &[&str] = &[
      "PATH", "HOME", "TERM", "LANG", "LC_ALL", "LC_CTYPE", "USER", "SHELL", "TMPDIR",
  ];
  
@@ -680,13 +680,16 @@ index 84a0d60806a7956b83254da3ffdfa3df21af7478..dffe9d056a4f808d20ad80d6d149d3c2
  /// Host switch that turns the agent sandbox off for the whole process.
  ///
  /// For hosts that already isolate the core (a container, a CI or benchmark
-@@ -257,11 +262,16 @@ async fn execute_unsandboxed(
+@@ -271,7 +276,7 @@ async fn execute_unsandboxed(
      let mut cmd = platform_shell::build_tokio_command(command);
      cmd.current_dir(working_dir);
      cmd.env_clear();
 -    for var in SANDBOX_ENV_PASSTHROUGH {
 +    for var in SANDBOX_ENV_PASSTHROUGH.iter().copied() {
          if let Ok(val) = std::env::var(var) {
+             if val.is_empty() {
+                 anyhow::bail!("sandbox passthrough environment variable {var} is empty");
+@@ -279,6 +284,11 @@ async fn execute_unsandboxed(
              cmd.env(var, val);
          }
      }
@@ -695,16 +698,19 @@ index 84a0d60806a7956b83254da3ffdfa3df21af7478..dffe9d056a4f808d20ad80d6d149d3c2
 +            cmd.env(var, val);
 +        }
 +    }
+     platform_shell::forward_windows_bootstrap_env(&mut cmd)?;
      for (k, v) in extra_env {
          cmd.env(k, v);
-     }
-@@ -385,11 +395,16 @@ async fn execute_local_jail(
+@@ -406,7 +416,7 @@ async fn execute_local_jail(
      let mut cmd = platform_shell::build_std_command(&wrapped);
      cmd.current_dir(working_dir);
      cmd.env_clear();
 -    for var in SANDBOX_ENV_PASSTHROUGH {
 +    for var in SANDBOX_ENV_PASSTHROUGH.iter().copied() {
          if let Ok(val) = std::env::var(var) {
+             if val.is_empty() {
+                 anyhow::bail!("sandbox passthrough environment variable {var} is empty");
+@@ -414,6 +424,11 @@ async fn execute_local_jail(
              cmd.env(var, val);
          }
      }
@@ -713,11 +719,11 @@ index 84a0d60806a7956b83254da3ffdfa3df21af7478..dffe9d056a4f808d20ad80d6d149d3c2
 +            cmd.env(var, val);
 +        }
 +    }
-     cmd.env("TMPDIR", &scratch.path);
+     platform_shell::forward_windows_bootstrap_env_std(&mut cmd)?;
      for (k, v) in extra_env {
          cmd.env(k, v);
 diff --git a/crates/openhuman-core/src/sandbox/ops_tests.rs b/crates/openhuman-core/src/sandbox/ops_tests.rs
-index 374ced5cb81f21d5704fd404c1430838ade0bdc5..2e952cd1f76c06556e5065f0aee904a8da592c11 100644
+index 082e8dd54649e9d091280e5aefd6ed0f0f5b39b9..04f8b0d28d95694de0d5ba66a7ae56e50b13eb0d 100644
 --- a/crates/openhuman-core/src/sandbox/ops_tests.rs
 +++ b/crates/openhuman-core/src/sandbox/ops_tests.rs
 @@ -50,6 +50,13 @@ fn resolve_sandbox_policy_sandboxed_remote_uses_docker() {
@@ -734,7 +740,7 @@ index 374ced5cb81f21d5704fd404c1430838ade0bdc5..2e952cd1f76c06556e5065f0aee904a8
  }
  
  #[test]
-@@ -500,6 +507,7 @@ fn host_has(program: &str) -> bool {
+@@ -517,6 +524,7 @@ fn host_has(program: &str) -> bool {
  #[cfg(target_os = "linux")]
  #[tokio::test]
  async fn landlock_jail_runs_cargo_and_mktemp_but_blocks_writes_outside() {
@@ -742,7 +748,7 @@ index 374ced5cb81f21d5704fd404c1430838ade0bdc5..2e952cd1f76c06556e5065f0aee904a8
      if !landlock_in_force() {
          return;
      }
-@@ -641,3 +649,7 @@ fn sandbox_off_value_keeps_sandbox_on_otherwise() {
+@@ -658,3 +666,7 @@ fn sandbox_off_value_keeps_sandbox_on_otherwise() {
          assert!(!sandbox_off_value(v), "{v:?} must leave the sandbox on");
      }
  }
@@ -955,10 +961,10 @@ index 0000000000000000000000000000000000000000..c3738985369ff48d346087bebc85e4ca
 +    );
 +}
 diff --git a/docs/RELEASE-MANUAL-SMOKE.md b/docs/RELEASE-MANUAL-SMOKE.md
-index 023788306fe091726b2d4736262e7e47e3d43b5d..5ab08c2e99cd90955ca676747994d4b8c38d4038 100644
+index d5a4e58c701958921e8ee37bf4d66a0a418f5dd0..b8427842e45a676113e48bf566a78763543845e1 100644
 --- a/docs/RELEASE-MANUAL-SMOKE.md
 +++ b/docs/RELEASE-MANUAL-SMOKE.md
-@@ -89,6 +89,8 @@ Applies to every release, all platforms.
+@@ -95,6 +95,8 @@ Applies to every release, all platforms.
  - [ ] **OS-native notification toasts fire** — Trigger a notification from inside the app (e.g. memory captured, agent finished). Expected: a libnotify-style toast appears outside the app window. (CI Linux sees only Xvfb; this surface verifies on a real desktop.)
  - [ ] **Headless supervisor update stages without self-exit** — On a Linux service deployment with `[update] restart_strategy = "supervisor"` and `rpc_mutations_enabled = false`, stage a new core binary through the documented operator flow. Expected: the running process stays up until the supervisor restart, the staged binary is present on disk, and `systemctl restart openhuman` (or equivalent) picks up the new version.
  
@@ -966,12 +972,12 @@ index 023788306fe091726b2d4736262e7e47e3d43b5d..5ab08c2e99cd90955ca676747994d4b8
 +
  ### Cross-platform
  
- - [ ] **Agent files land in a visible folder** — Ask the agent for a short document or deck. Expected: the file appears in `~/OpenHuman/projects/Files` under its title (not in `~/.openhuman`); **Show in folder** in the chat Files panel opens the file manager at it; Settings → Agent OS access → **Files folder** shows that path, **Show in folder** opens it, and choosing another folder sends the next file there while the earlier file still opens. On an upgraded install, files from before the upgrade have moved into the folder.
+ - [ ] **Chat model picker selects the provider as well as the model (#6938)** — In an isolated test profile, switch the same thread from managed to Ollama, then to a configured BYOK provider, and back to a managed catalog model (including a `:free` variant). Verify the actual request endpoint and model match each selection, configured background routes stay unchanged, and reopening the app restores the selected provider/model. Selecting a workload hint must retain its configured route.
 diff --git a/docs/TEST-COVERAGE-MATRIX.md b/docs/TEST-COVERAGE-MATRIX.md
-index bde4641cdb2ada3dec5d418a465fb2def0654691..a86fa89804ee17ff306d3655fc89ad9335ac40fc 100644
+index 167ad79e018b3f4d363f1da182f01dbe03accdc1..03cfc1c69e6ecbd503957e4b252c2b77525dd1c9 100644
 --- a/docs/TEST-COVERAGE-MATRIX.md
 +++ b/docs/TEST-COVERAGE-MATRIX.md
-@@ -272,7 +272,7 @@ End-to-end coverage of the agent harness via the web-chat RPC surface against an
+@@ -277,7 +277,7 @@ End-to-end coverage of the agent harness via the web-chat RPC surface against an
  
  | ID    | Feature                      | Layer | Test path(s)                                                                                                    | Status | Notes                                                                                            |
  | ----- | ---------------------------- | ----- | --------------------------------------------------------------------------------------------------------------- | ------ | ------------------------------------------------------------------------------------------------ |
@@ -981,7 +987,7 @@ index bde4641cdb2ada3dec5d418a465fb2def0654691..a86fa89804ee17ff306d3655fc89ad93
  | 6.2.3 | Git Read Operations          | RU+WD | `vendor/tinyagents/vendor/tinytools/crates/tinytools-std/src/filesystem/git_operations/test.rs`, `app/test/e2e/specs/tool-shell-git-flow.spec.ts` | ✅     | Was 🟡 — WDIO seeds a fixture repo in OPENHUMAN_WORKSPACE and asserts read ops succeed           |
  | 6.2.4 | Git Write Operations         | RU+WD | `vendor/tinyagents/vendor/tinytools/crates/tinytools-std/src/filesystem/git_operations/test.rs`, `app/test/e2e/specs/tool-shell-git-flow.spec.ts` | ✅     | Was 🟡 — WDIO commits into the same fixture and asserts log advances                             |
 diff --git a/tests/agent_harness_e2e.rs b/tests/agent_harness_e2e.rs
-index a1b73c7aed990f3993ab71d36cf8dec617ec440b..eb2ba2a35c2f7ac82fbaf96464fab004a5e4fc1d 100644
+index d770a7b3ddfa04a0ddb4341f02234292f4ad89a6..e6ff100496619d372b7c741363c53ade85780572 100644
 --- a/tests/agent_harness_e2e.rs
 +++ b/tests/agent_harness_e2e.rs
 @@ -36,7 +36,9 @@ use serde_json::{json, Value};
